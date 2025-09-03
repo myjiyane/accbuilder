@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>WB Passport — Staging</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script type="module" src="./widget/wb-passport.js"></script>
+    <style>
+        body {
+            font-family: Inter, system-ui, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif;
+            background: #f6f8fb;
+            margin: 0;
+            padding: 24px
+        }
+
+        .wrap {
+            max-width: 900px;
+            margin: 0 auto
+        }
+
+        .bar {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 16px
+        }
+
+        input,
+        button {
+            padding: 8px 10px;
+            border: 1px solid #cbd5df;
+            border-radius: 10px
+        }
+
+        button {
+            background: #11b5a3;
+            color: #fff;
+            border-color: #0b9688;
+            font-weight: 600;
+            cursor: pointer
+        }
+
+        button:disabled {
+            opacity: .5;
+            cursor: not-allowed
+        }
+
+        .note {
+            font-size: 12px;
+            color: #5f6b76
+        }
+    </style>
+</head>
+
+<body>
+    <div class="wrap">
+        <div class="bar">
+            <input id="vin" placeholder="Enter VIN (e.g., WDD2040082R088866)" size="32" />
+            <button id="load">Load</button>
+            <span class="note">API: same origin — using /passports/:vin</span>
+        </div>
+        <div id="wb-passport"></div>
+    </div>
+
+    <script type="module">
+        import { WBPassport } from './widget/wb-passport.js';
+
+        const $vin = document.getElementById('vin');
+        const $btn = document.getElementById('load');
+        const $root = document.getElementById('wb-passport');
+
+        // VIN via ?vin=… for quick links
+        const params = new URLSearchParams(location.search);
+        const initialVin = params.get('vin');
+        if (initialVin) {
+            $vin.value = initialVin;
+            WBPassport.render($root, { vin: initialVin });
+        }
+
+        $btn.addEventListener('click', () => {
+            const vin = ($vin.value || '').trim();
+            if (!vin) return;
+            WBPassport.render($root, { vin });
+            history.replaceState({}, '', `?vin=${encodeURIComponent(vin)}`);
+        });
+    </script>
+</body>
+
+</html>

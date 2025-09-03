@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>WB Passport — Ops Console</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script type="module" src="./admin.js"></script>
+    <style>
+        :root {
+            --ink: #0f1720;
+            --mut: #5f6b76;
+            --line: #e6eaef;
+            --brand: #11b5a3;
+            --brand-d: #0b9688
+        }
+
+        * {
+            box-sizing: border-box
+        }
+
+        body {
+            font-family: Inter, system-ui, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif;
+            background: #f6f8fb;
+            color: var(--ink);
+            margin: 0
+        }
+
+        .wrap {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 20px
+        }
+
+        h1 {
+            font-size: 18px;
+            margin: 0 0 12px;
+            color: #0b3b3c
+        }
+
+        .row {
+            display: flex;
+            gap: 14px;
+            align-items: flex-end;
+            flex-wrap: wrap
+        }
+
+        .card {
+            background: #fff;
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 14px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, .04);
+            margin-bottom: 16px
+        }
+
+        label {
+            font-size: 12px;
+            color: var(--mut);
+            display: block;
+            margin-bottom: 6px
+        }
+
+        input[type="text"],
+        input[type="file"] {
+            border: 1px solid #cbd5df;
+            border-radius: 10px;
+            padding: 8px 10px;
+            background: #fff;
+            min-width: 260px
+        }
+
+        button {
+            border-radius: 10px;
+            border: 1px solid var(--brand-d);
+            background: var(--brand);
+            color: #fff;
+            font-weight: 600;
+            padding: 8px 12px;
+            cursor: pointer
+        }
+
+        button:disabled {
+            opacity: .5;
+            cursor: not-allowed
+        }
+
+        table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0
+        }
+
+        th,
+        td {
+            padding: 10px;
+            border-bottom: 1px solid #edf1f6;
+            font-size: 14px;
+            vertical-align: top
+        }
+
+        th {
+            font-size: 12px;
+            color: #3d4a55;
+            text-align: left
+        }
+
+        .mut {
+            color: var(--mut)
+        }
+
+        .pill {
+            display: inline-block;
+            border: 1px solid #cfe7e4;
+            background: #e7f4f3;
+            color: #0b3b3c;
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: 12px
+        }
+
+        .pill.green {
+            border-color: #b7e2c3;
+            background: #eaf8ee;
+            color: #0a3a22
+        }
+
+        .pill.amber {
+            border-color: #f3d39a;
+            background: #fff6e5;
+            color: #6b4a00
+        }
+
+        .pill.red {
+            border-color: #f5b0b0;
+            background: #fdecec;
+            color: #7a2020
+        }
+
+        .actions button {
+            margin-right: 6px;
+            border-color: #cbd5df;
+            background: #fff;
+            color: #0b3b3c
+        }
+
+        .actions button.primary {
+            background: var(--brand);
+            border-color: var(--brand-d);
+            color: #fff
+        }
+
+        .right {
+            margin-left: auto
+        }
+
+        .tiny {
+            font-size: 12px
+        }
+
+        .mono {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px
+        }
+
+        .ok {
+            color: #0a3a22
+        }
+
+        .bad {
+            color: #7a2020
+        }
+    </style>
+</head>
+
+<body>
+    <div class="wrap">
+        <h1>WesBank Passport — Ops Console</h1>
+
+        <!-- Ingest panel -->
+        <div class="card">
+            <div class="row">
+                <div>
+                    <label for="pdf">Upload DEKRA PDF</label>
+                    <input id="pdf" type="file" accept="application/pdf">
+                </div>
+                <div>
+                    <label for="lot">Lot ID (optional)</label>
+                    <input id="lot" type="text" placeholder="WB-POC-001">
+                </div>
+                <div>
+                    <label for="site">Site hint (optional)</label>
+                    <input id="site" type="text" placeholder="DEKRA WBC Cape Town - Brackengate">
+                </div>
+                <div>
+                    <button id="ingest">Ingest → Draft</button>
+                </div>
+                <div class="right tiny mut">
+                    API: <span class="mono">/ingest/dekra</span> • After ingest, VIN is auto-detected.
+                </div>
+            </div>
+            <div id="ingest-out" class="tiny mut" style="margin-top:8px;"></div>
+        </div>
+
+        <!-- Records table -->
+        <div class="card">
+            <div class="row">
+                <div class="mut tiny">Showing all stored passports (dev storage)</div>
+                <div class="right">
+                    <button id="refresh">Refresh</button>
+                    <label class="tiny mut" style="margin-left:8px">
+                        <input id="autoref" type="checkbox"> auto-refresh
+                    </label>
+                </div>
+            </div>
+
+            <table id="tbl">
+                <thead>
+                    <tr>
+                        <th>VIN</th>
+                        <th>Lot</th>
+                        <th>Odometer</th>
+                        <th>Inspection</th>
+                        <th>Status</th>
+                        <th>Updated</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="rows">
+                    <tr>
+                        <td colspan="7" class="mut">No data.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+
+</html>

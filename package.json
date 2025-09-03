@@ -14,13 +14,17 @@
     "validate:sealed": "tsx src/cli/validate.ts sealed",
     "seal": "tsx src/cli/seal.ts",
     "extract": "tsx src/cli/extract.ts",
-    "verify": "tsx src/cli/verify.ts"
+    "verify": "tsx src/cli/verify.ts",
+    "serve": "tsx src/server/app.ts"
   },
   "dependencies": {
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
     "commander": "^12.1.0",
+    "cors": "^2.8.5",
     "date-fns": "^3.6.0",
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
     "pdf-parse": "^1.1.1"
   },
   "devDependencies": {
