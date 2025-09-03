@@ -1,0 +1,36 @@
+{
+  "vin": "MAJFXXMTKFJP14265",
+  "lot_id": "754605025-DEKRA-REPORT-2-1",
+  "dekra": {
+    "inspection_ts": "2024-02-08T00:00:00.000+02:00",
+    "site": "Https://www.dekrasmart.co.za/Analysis/Reports?Cliente=OTYy&Produto=MjA3&Coleta=MTI0OTg1OA==&Summary+RmFsc2U=&Cost=Rmfsx2U=&... 7/22/242:05PM"
+  },
+  "odometer": {
+    "km": 70,
+    "source": "DEKRA"
+  },
+  "tyres_mm": {
+    "fl": null,
+    "fr": null,
+    "rl": null,
+    "rr": null
+  },
+  "brakes": {
+    "front_pct": null,
+    "rear_pct": null
+  },
+  "dtc": {
+    "status": "amber",
+    "codes": [
+      {
+        "code": "GT2125"
+      }
+    ]
+  },
+  "remarks": null,
+  "provenance": {
+    "captured_by": "system",
+    "site": "Https://www.dekrasmart.co.za/Analysis/Reports?Cliente=OTYy&Produto=MjA3&Coleta=MTI0OTg1OA==&Summary+RmFsc2U=&Cost=Rmfsx2U=&... 7/22/242:05PM",
+    "ts": "2025-09-03T10:04:55.750+02:00"
+  }
+}

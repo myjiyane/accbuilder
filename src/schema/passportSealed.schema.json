@@ -3,40 +3,27 @@
   "$id": "https://example.dev/schema/passportSealed.schema.json",
   "title": "Vehicle Passport (Sealed)",
   "type": "object",
+
   "allOf": [
+    { "$ref": "https://example.dev/schema/passportDraft.schema.json" },
     {
-      "$ref": "passportDraft.schema.json"
-    }
-  ],
-  "required": [
-    "seal"
-  ],
-  "properties": {
-    "seal": {
       "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "hash",
-        "sig",
-        "key_id",
-        "sealed_ts"
-      ],
       "properties": {
-        "hash": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
-        },
-        "sig": {
-          "type": "string"
-        },
-        "key_id": {
-          "type": "string"
-        },
-        "sealed_ts": {
-          "type": "string",
-          "format": "date-time"
+        "seal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hash", "sig", "key_id", "sealed_ts"],
+          "properties": {
+            "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "sig":  { "type": "string" },
+            "key_id": { "type": "string" },
+            "sealed_ts": { "type": "string", "format": "date-time" }
+          }
         }
-      }
+      },
+      "required": ["seal"]
     }
-  }
+  ],
+
+  "unevaluatedProperties": false
 }

@@ -1,0 +1,69 @@
+{
+  "vin": "WDD2040022R148261",
+  "lot_id": "735010739-Dekra-Report-10862581715062266008",
+  "dekra": {
+    "inspection_ts": "2024-03-26T00:00:00.000+02:00",
+    "site": "We Buy Cars - Cape Town 1 (Brackenfell) 1 Dove Street, BRACKENFELL"
+  },
+  "odometer": {
+    "km": 167130,
+    "source": "DEKRA"
+  },
+  "tyres_mm": {
+    "fl": 1,
+    "fr": 1,
+    "rl": null,
+    "rr": null
+  },
+  "brakes": {
+    "front_pct": null,
+    "rear_pct": null
+  },
+  "dtc": {
+    "status": "amber",
+    "codes": [
+      {
+        "code": "USED"
+      },
+      {
+        "code": "CAR REPORT"
+      },
+      {
+        "code": "BENZ"
+      },
+      {
+        "code": "COMMON"
+      },
+      {
+        "code": "SUPPLY"
+      },
+      {
+        "code": "IN SYSTEM"
+      },
+      {
+        "code": "IS TOO"
+      },
+      {
+        "code": "LOWSTORED"
+      },
+      {
+        "code": "ACCORDING"
+      },
+      {
+        "code": "TO AGE"
+      }
+    ]
+  },
+  "remarks": null,
+  "provenance": {
+    "captured_by": "system",
+    "site": "We Buy Cars - Cape Town 1 (Brackenfell) 1 Dove Street, BRACKENFELL",
+    "ts": "2025-09-03T10:04:55.495+02:00"
+  },
+  "seal": {
+    "hash": "3bd7a05c468f77165234263cce60859492497aff8708fb53d0ea20e8e6145484",
+    "sig": "MEUCIQCFkyj6cDQ3EpsIhgHeKJIws0A0ne9eDdxd8/xbzTHNpgIgPiAkjPeNjXxGVCf9FM2Hr8Q0ipmwTD5Gs1/Nvyunt5I=",
+    "key_id": "local-ec-p256-v1",
+    "sealed_ts": "2025-09-03T14:32:22.694+02:00"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "vin": "WDD2040082R088866",
+  "lot_id": "735010744-Dekra-Report-11232311715062611749",
+  "dekra": {
+    "inspection_ts": "2024-04-29T00:00:00.000+02:00",
+    "site": "We Buy Cars - Cape Town 1 (Brackenfell) 1 Dove Street, BRACKENFELL"
+  },
+  "odometer": {
+    "km": 238574,
+    "source": "DEKRA"
+  },
+  "tyres_mm": {
+    "fl": 1,
+    "fr": 1,
+    "rl": null,
+    "rr": null
+  },
+  "brakes": {
+    "front_pct": null,
+    "rear_pct": null
+  },
+  "dtc": {
+    "status": "green",
+    "codes": []
+  },
+  "remarks": null,
+  "provenance": {
+    "captured_by": "system",
+    "site": "We Buy Cars - Cape Town 1 (Brackenfell) 1 Dove Street, BRACKENFELL",
+    "ts": "2025-09-03T10:04:55.599+02:00"
+  }
+}
