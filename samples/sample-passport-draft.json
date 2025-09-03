@@ -1,0 +1,42 @@
+{
+  "vin": "AFA1B2C3D4E5F6G7H",
+  "lot_id": "WB-2025-12345",
+  "dekra": {
+    "url": "https://example.dekra/report/123",
+    "inspection_ts": "2025-08-14T09:15:00+02:00",
+    "site": "Midrand"
+  },
+  "odometer": {
+    "km": 87412,
+    "source": "DEKRA"
+  },
+  "tyres_mm": {
+    "fl": 5.6,
+    "fr": 5.2,
+    "rl": 4.8,
+    "rr": 4.9
+  },
+  "brakes": {
+    "front_pct": 60,
+    "rear_pct": 50
+  },
+  "dtc": {
+    "status": "amber",
+    "codes": [
+      {
+        "code": "P0420",
+        "desc": "Catalyst efficiency"
+      },
+      {
+        "code": "P0301",
+        "desc": "Misfire cyl 1"
+      }
+    ]
+  },
+  "remarks": "Front bumper scuff noted.",
+  "provenance": {
+    "captured_by": "staff-001",
+    "site": " Yard-01",
+    "ts": "2025-09-02T10:15:00+02:00"
+  }
+}

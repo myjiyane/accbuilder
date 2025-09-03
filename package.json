@@ -1,0 +1,23 @@
+{
+  "name": "wb-passport",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p .",
+    "test": "vitest run",
+    "validate:draft": "tsx src/index.ts --validate draft samples/sample-passport-draft.json",
+    "validate:sealed": "tsx src/index.ts --validate sealed samples/sample-passport-sealed.json"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.4",
+    "vitest": "^1.6.0"
+  }
+}
