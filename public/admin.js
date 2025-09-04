@@ -80,6 +80,8 @@ function renderRow(rec) {
     <td class="actions">
       <button class="primary" data-seal>Seal</button>
       <button data-verify>Verify</button>
+      <button data-reingest>Re-ingest</button>
+      <input type="file" data-reingest-file accept="application/pdf" style="display:none" />
       <button data-view-d>Draft</button>
       <button data-view-s>Sealed</button>
       <button data-del>Delete</button>
@@ -92,8 +94,21 @@ function renderRow(rec) {
   $('button[data-view-s]', tr).addEventListener('click', () => viewJson(rec.vin, 'sealed'));
   $('button[data-del]', tr).addEventListener('click', () => del(rec.vin));
 
+  // Re-ingest wiring
+  $('button[data-reingest]', tr).addEventListener('click', () => {
+    $('input[data-reingest-file]', tr).click();
+  });
+  $('input[data-reingest-file]', tr).addEventListener('change', (ev) => {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    reIngest(rec.vin, file, tr);
+    ev.target.value = ''; // reset input
+  });
+
   return tr;
 }
+
+// --- row actions ---
 
 async function seal(vin, tr){
   const btn = $('button[data-seal]', tr);
@@ -143,6 +158,34 @@ async function viewJson(vin, kind){
   win.document.write(`<pre>${esc(JSON.stringify(obj || {note:`No ${kind}`}, null, 2))}</pre>`);
   win.document.close();
 }
+
+async function reIngest(vin, file, tr){
+  const btn = $('button[data-reingest]', tr);
+  btn.disabled = true; btn.textContent = 'Re-ingesting…';
+  try{
+    const fd = new FormData();
+    fd.append('pdf', file);
+    fd.append('expected_vin', vin); // server will 409 if VIN mismatches
+    const res = await fetch('/ingest/dekra', { method:'POST', body: fd });
+    const j = await res.json();
+
+    if (res.status === 409 && j?.error === 'vin_mismatch') {
+      alert(`VIN mismatch:\n  expected: ${j.expectedVin}\n  parsed:   ${j.parsedVin}\nAborting replace.`);
+      return;
+    }
+    if (!res.ok) throw new Error(j?.error || res.statusText);
+
+    btn.textContent = 'Re-ingested ✓';
+    setTimeout(loadList, 300);
+  } catch(e){
+    btn.textContent = 'Re-ingest';
+    alert('Re-ingest failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// --- utils ---
 
 function esc(s){ return (s??'').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 

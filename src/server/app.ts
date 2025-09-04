@@ -48,6 +48,11 @@ async function maybeRead(pathLike: string): Promise<string | undefined> {
   }
 }
 
+function sanitizeVin(v?: string) {
+  return (v || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 17);
+}
+
+
 let PRIVATE_KEY_PEM = await maybeRead(PRIVATE_KEY_PATH);
 let PUBLIC_KEY_PEM = await maybeRead(PUBLIC_KEY_PATH);
 
@@ -106,6 +111,7 @@ app.post("/ingest/dekra", upload.single("pdf"), async (req, res) => {
     const dekraUrl = (req.body.dekra_url as string) || undefined;
     const siteHint = (req.body.site_hint as string) || undefined;
     const capturedBy = (req.body.captured_by as string) || "system";
+    const expectedVin = sanitizeVin(req.body.expected_vin as string | undefined); 
 
     let text: string | undefined;
 
@@ -117,34 +123,31 @@ app.post("/ingest/dekra", upload.single("pdf"), async (req, res) => {
     }
 
     if (!text || text.length < 10) {
-      return res.status(400).json({ error: "no PDF uploaded and no text provided" });
+      return res.status(400).json({ error: "no_pdf_or_text" });
     }
 
     const draft: PassportDraft = mapToPassportDraft(text, {
-      lotId,
-      dekraUrl,
-      siteHint,
-      capturedBy,
+      lotId, dekraUrl, siteHint, capturedBy,
     });
+
+    
+    if (expectedVin && sanitizeVin(draft.vin) !== expectedVin) {
+      return res.status(409).json({
+        error: "vin_mismatch",
+        expectedVin,
+        parsedVin: sanitizeVin(draft.vin),
+      });
+    }
 
     const valid = validateDraft(draft);
     if (!valid) {
-      return res.status(422).json({ error: "schema invalid", details: validateDraft.errors, draft });
+      return res.status(422).json({ error: "schema_invalid", details: validateDraft.errors, draft });
     }
 
     const rec = await storage.upsertDraft(draft);
 
-    // simple coverage proxy
-    const fields = [
-      "vin",
-      "dekra.inspection_ts",
-      "dekra.site",
-      "odometer.km",
-      "tyres_mm.fl",
-      "tyres_mm.fr",
-      "tyres_mm.rl",
-      "tyres_mm.rr",
-    ] as const;
+    const fields = ["vin","dekra.inspection_ts","dekra.site","odometer.km","tyres_mm.fl","tyres_mm.fr","tyres_mm.rl","tyres_mm.rr"] as const;
+    
     const coverage = fields.reduce((acc, p) => {
       const v = p.split(".").reduce<any>((cur, k) => (cur ? cur[k] : undefined), draft as any);
       return acc + (v !== undefined && v !== null && v !== "" ? 1 : 0);
@@ -156,6 +159,7 @@ app.post("/ingest/dekra", upload.single("pdf"), async (req, res) => {
     res.status(500).json({ error: "ingest_failed", message: e?.message || String(e) });
   }
 });
+
 
 /**
  * Seal a stored draft by VIN.
