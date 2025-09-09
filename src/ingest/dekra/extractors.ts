@@ -119,30 +119,50 @@ export function extractTyres(text: string): TyreDepths {
  * - Else collect up to 10 distinct code-like tokens, mark amber.
  * Note: many DEKRA PDFs include OEM codes, not pure OBD-II “P0xxx”.
  */
-export function extractDtc(text: string): { status: DtcStatus; codes: DtcCode[] } {
-  if (DTC_NEGATION_RE.test(text)) return { status: 'green', codes: [] };
 
-  const tokens: string[] = [];
-  for (const m of text.matchAll(GENERIC_DTC_RE)) tokens.push(m[1]);
-  for (const m of text.matchAll(OEM_DTC_RE)) tokens.push(m[1]);
+const RE_DTC = /(?:^|[^A-Z0-9])([PCBU][0-9A-F]{4})(?![A-Z0-9])/g;
+const NO_FAULT_PHRASES = [
+  /\bNO\s+(DTCS?|FAULT(S)?|ERROR(S)?|TROUBLE\s+CODES?)\b/i,
+  /\bNO\s+FAULT\s+CODES\s+FOUND\b/i,
+  /\bNO\s+DIAGNOSTIC\s+TROUBLE\s+CODES?\b/i,
+];
+const HAS_DTC_SECTION = [
+  /\bDIAGNOSTIC\s+TROUBLE\s+CODES?\b/i,
+  /\bDTC(S)?\b/i,
+  /\bFAULT\s+CODES?\b/i,
+];
 
-  // Normalize + filter stop-words
-  const cleaned = tokens
-    .map(t => t.trim())
-    .filter(t => t.length >= 3)
-    .filter(t => !STOP_WORDS.has(t.toUpperCase()));
+export function extractDtc(text: string): { status: DtcStatus; codes: { code: string }[] } {
+  const t = text || "";
 
-  // Deduplicate, cap to 10
-  const seen = new Set<string>();
-  const codes: DtcCode[] = [];
-  for (const c of cleaned) {
-    const key = c.toUpperCase();
-    if (!seen.has(key)) {
-      seen.add(key);
-      codes.push({ code: c });
-      if (codes.length >= 10) break;
-    }
+  // 1) Quick win: explicit "no DTC" phrasing → green
+  if (NO_FAULT_PHRASES.some((re) => re.test(t))) {
+    return { status: "green", codes: [] };
   }
 
-  return { status: codes.length ? 'amber' : 'n/a', codes };
+  // 2) Find real DTC tokens only
+  const tokens = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = RE_DTC.exec(t.toUpperCase())) !== null) {
+    tokens.add(m[1]);
+  }
+  const codes = [...tokens].map((code) => ({ code }));
+
+  if (codes.length === 0) {
+    // If a DTC section is present but no tokens, assume green; otherwise N/A
+    const mentionsDtc = HAS_DTC_SECTION.some((re) => re.test(t));
+    return { status: mentionsDtc ? "green" : "n/a", codes: [] };
+  }
+
+  // 3) Status heuristics
+  // - If "MIL ON", "CURRENT", "ACTIVE", "PRESENT", "PERMANENT", "STORED" → red
+  // - If only "PENDING" mentioned → amber
+  const upper = t.toUpperCase();
+  const isRed = /\b(MIL\s+ON|CURRENT|ACTIVE|PRESENT|PERMANENT|STORED)\b/.test(upper);
+  const isPending = /\bPENDING\b/.test(upper);
+
+  const status: DtcStatus = isRed ? "red" : (isPending ? "amber" : "amber");
+
+  return { status, codes };
 }
+

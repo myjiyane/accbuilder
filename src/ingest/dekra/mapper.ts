@@ -67,7 +67,7 @@ export function mapToPassportDraft(text: string, opts: MapOptions = {}): Passpor
       front_pct: null,
       rear_pct: null,
     },
-    dtc,
+    dtc: dtc.status === "n/a" && dtc.codes.length === 0 ? undefined : dtc,
     remarks: null,
     provenance: {
       captured_by: opts.capturedBy || "system",

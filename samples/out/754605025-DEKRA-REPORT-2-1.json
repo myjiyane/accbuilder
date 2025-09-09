@@ -19,18 +19,10 @@
     "front_pct": null,
     "rear_pct": null
   },
-  "dtc": {
-    "status": "amber",
-    "codes": [
-      {
-        "code": "GT2125"
-      }
-    ]
-  },
   "remarks": null,
   "provenance": {
     "captured_by": "system",
     "site": "Https://www.dekrasmart.co.za/Analysis/Reports?Cliente=OTYy&Produto=MjA3&Coleta=MTI0OTg1OA==&Summary+RmFsc2U=&Cost=Rmfsx2U=&... 7/22/242:05PM",
-    "ts": "2025-09-03T10:04:55.750+02:00"
+    "ts": "2025-09-09T07:18:31.660+02:00"
   }
 }

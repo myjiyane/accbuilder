@@ -20,44 +20,13 @@
     "rear_pct": null
   },
   "dtc": {
-    "status": "amber",
-    "codes": [
-      {
-        "code": "USED"
-      },
-      {
-        "code": "CAR REPORT"
-      },
-      {
-        "code": "BENZ"
-      },
-      {
-        "code": "COMMON"
-      },
-      {
-        "code": "SUPPLY"
-      },
-      {
-        "code": "IN SYSTEM"
-      },
-      {
-        "code": "IS TOO"
-      },
-      {
-        "code": "LOWSTORED"
-      },
-      {
-        "code": "ACCORDING"
-      },
-      {
-        "code": "TO AGE"
-      }
-    ]
+    "status": "green",
+    "codes": []
   },
   "remarks": null,
   "provenance": {
     "captured_by": "system",
     "site": "We Buy Cars - Cape Town 1 (Brackenfell) 1 Dove Street, BRACKENFELL",
-    "ts": "2025-09-03T10:04:55.495+02:00"
+    "ts": "2025-09-09T07:18:31.252+02:00"
   }
 }
