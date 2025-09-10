@@ -9,7 +9,6 @@ import crypto from "node:crypto";
 import photosRouter from "./photos";
 
 
-// ---- project modules (adjust paths if your tree differs)
 import { createDevStorage } from "./storage.js";
 import type { PassportDraft, PassportSealed } from "../types/passport.js";
 import { validateDraft, validateSealed } from "../schema/index.js";
@@ -22,10 +21,9 @@ import { mapToPassportDraft } from "../ingest/dekra/mapper.js";
 const DATA_DIR = process.env.DATA_DIR || "data";
 const PORT = Number(process.env.PORT || 3000);
 const API_PREFIX = process.env.API_PREFIX || "/api/v1";
-const API_KEY = process.env.API_KEY || ""; // leave empty to disable in dev
+const API_KEY = process.env.API_KEY || ""; 
 
 // dev signing keypair (PEM strings)
-// You can set PRIVATE_KEY_PEM / PUBLIC_KEY_PEM in env to override
 const PRIVATE_KEY_PEM = process.env.PRIVATE_KEY_PEM || "";
 const PUBLIC_KEY_PEM = process.env.PUBLIC_KEY_PEM || "";
 
@@ -39,7 +37,6 @@ function normalizeWhitespace(s: string): string {
     .trim();
 }
 
-// stable canonicalization for signing
 function canonicalize(input: any): any {
   if (Array.isArray(input)) return input.map(canonicalize);
   if (input && typeof input === "object") {
@@ -49,17 +46,17 @@ function canonicalize(input: any): any {
   }
   return input;
 }
+
 function canonicalBytes(obj: any): Buffer {
   const canon = canonicalize(obj);
   return Buffer.from(JSON.stringify(canon));
 }
 
-// compute sha256 hex of buffer
+
 function sha256Hex(buf: Buffer): string {
   return crypto.createHash("sha256").update(buf).digest("hex");
 }
 
-// sign bytes with RSA-SHA256 if PRIVATE_KEY_PEM provided
 function signBytesRS256(buf: Buffer): string | null {
   if (!PRIVATE_KEY_PEM) return null;
   const signer = crypto.createSign("RSA-SHA256");
@@ -80,7 +77,6 @@ function verifyBytesRS256(buf: Buffer, b64sig: string): boolean | null {
   }
 }
 
-// VIN sanitizer
 function sanitizeVin(v?: string) {
   return (v || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 17);
 }
@@ -114,7 +110,6 @@ api.use((req, res, next) => {
   return res.status(401).json({ error: "unauthorized" });
 });
 
-// Attach routes to both legacy app and versioned api
 attachRoutes(app);
 attachRoutes(api);
 
@@ -245,18 +240,17 @@ function attachRoutes(r: express.Router) {
 
       const bytes = canonicalBytes(payload);
       const hash = sha256Hex(bytes);
-      const sig = signBytesRS256(bytes); // can be null if no private key set
+      const sig = signBytesRS256(bytes);
       const sealed: PassportSealed = {
         ...(rec.draft as PassportDraft),
         seal: {
           hash,
-          sig: sig || "", // schema expects a string; leave empty if unsigned
+          sig: sig || "", 
           key_id: process.env.KEY_ID || "local-dev",
           sealed_ts: new Date().toISOString(),
         },
       };
 
-      // Validate sealed schema
       const ok = validateSealed(sealed);
       if (!ok) {
         return res.status(422).json({ error: "sealed_schema_invalid", details: validateSealed.errors });
@@ -270,7 +264,7 @@ function attachRoutes(r: express.Router) {
     }
   });
 
-  // verify sealed (hash + optional RSA verify if PUBLIC_KEY_PEM present)
+  
   r.get("/verify", async (req, res) => {
     const vin = sanitizeVin(String(req.query.vin || ""));
     if (!vin) return res.status(400).json({ error: "vin_required" });
@@ -297,11 +291,104 @@ function attachRoutes(r: express.Router) {
       reasons.push("no_signature_present");
     }
 
-    const valid = hashOk && (sigOk !== false); // consider valid if hash ok and no bad signature
+    const valid = hashOk && (sigOk !== false); 
     res.json({ valid, reasons, hash: hashExpected, key_id: sealed.seal?.key_id || null });
   });
-}
+  
+  // ---- Intake seed: set required photos for a VIN/lot ----
+  r.post("/intake/seed", async (req, res) => {
+    try {
+      const vin = sanitizeVin(req.body?.vin);
+      const lotId = String(req.body?.lot_id || "").trim();
+      const required = Array.isArray(req.body?.required_photos) ? req.body.required_photos : [];
+      if (!vin || !lotId || required.length === 0) {
+        return res.status(400).json({ error: "vin_lot_and_required_photos_required" });
+      }
+      const rec = await storage.get(vin);
+      const draft = (rec?.draft || { vin, lot_id: lotId }) as PassportDraft;
+      draft.lot_id = lotId;
+      draft.images = draft.images || { items: [] };
+      draft.images.required = required as any; // uses your ImageRole enum
+      const updated = await storage.upsertDraft(draft);
+      res.json({ ok: true, record: updated });
+    } catch (e: any) {
+      res.status(500).json({ error: "seed_failed", message: e?.message || String(e) });
+    }
+  });
 
+  // ---- Intake checklist/readiness for a VIN ----
+  r.get("/intake/checklist/:vin", async (req, res) => {
+    const vin = sanitizeVin(req.params.vin);
+    const rec = await storage.get(vin);
+    if (!rec?.draft && !rec?.sealed) return res.status(404).json({ error: "not_found" });
+    const model = rec.sealed || rec.draft!;
+    const required = model.images?.required || [];
+    const present = new Set((model.images?.items || []).map(i => i.role));
+    const missing = required.filter(role => !present.has(role));
+    const hasDekra = !!model.dekra?.url;
+    const hasOdo  = model.odometer?.km != null;
+    const dtcOk   = !!model.dtc && (model.dtc.status === "green" || (model.dtc.codes?.length || 0) >= 0);
+    const photosOk = missing.length === 0;
+
+    const ready = hasDekra && hasOdo && photosOk; // keep DTC informational for POC
+    res.json({
+      vin,
+      lot_id: model.lot_id,
+      checklist: {
+        hasDekra, hasOdo, photosOk, dtcStatus: model.dtc?.status || "n/a",
+        requiredCount: required.length,
+        presentCount: present.size,
+        missing
+      },
+      ready
+    });
+  });
+
+  // ---- Seal with readiness enforcement (override with ?force=1) ----
+  r.post("/passports/seal/strict", async (req, res) => {
+    const vin = sanitizeVin(req.body?.vin);
+    const force = String(req.query.force || "") === "1";
+    if (!vin) return res.status(400).json({ error: "vin_required" });
+
+    // compute readiness
+    const rec0 = await storage.get(vin);
+    if (!rec0?.draft) return res.status(404).json({ error: "draft_not_found" });
+    const model = rec0.draft;
+    const required = model.images?.required || [];
+    const present = new Set((model.images?.items || []).map(i => i.role));
+    const missing = required.filter(r => !present.has(r));
+    const hasDekra = !!model.dekra?.url;
+    const hasOdo  = model.odometer?.km != null;
+
+    const reasons: string[] = [];
+    if (!hasDekra) reasons.push("missing_dekra_url");
+    if (!hasOdo) reasons.push("missing_odometer_km");
+    if (missing.length > 0) reasons.push(`missing_photos:${missing.join(",")}`);
+
+    if (reasons.length && !force) {
+      return res.status(412).json({ error: "not_ready", reasons });
+    }
+
+    // delegate to your existing /passports/seal logic (inline here for clarity)
+    try {
+      const payload = { ...rec0.draft } as any;
+      delete payload.seal;
+      const bytes = canonicalBytes(payload);
+      const hash = sha256Hex(bytes);
+      const sig = signBytesRS256(bytes) || "";
+      const sealed: PassportSealed = { ...(rec0.draft as PassportDraft), seal: {
+        hash, sig, key_id: process.env.KEY_ID || "local-dev", sealed_ts: new Date().toISOString()
+      }};
+      const ok = validateSealed(sealed);
+      if (!ok) return res.status(422).json({ error: "sealed_schema_invalid", details: validateSealed.errors });
+      const updated = await storage.upsertSealed(sealed);
+      res.json({ ok: true, record: updated, forced: reasons.length > 0 && force ? reasons : undefined });
+    } catch (e: any) {
+      res.status(500).json({ error: "seal_failed", message: e?.message || String(e) });
+    }
+  });
+
+}
 
 app.use(`${API_PREFIX}/intake/photos`, photosRouter);
 app.use("/intake/photos", photosRouter); 
