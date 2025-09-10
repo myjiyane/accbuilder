@@ -6,6 +6,37 @@ export interface DtcCode {
   desc?: string;
 }
 
+// ---- Image manifest (for intake photos) ----
+export type ImageRole =
+  | 'exterior_front_34'
+  | 'exterior_rear_34'
+  | 'left_side'
+  | 'right_side'
+  | 'interior_front'
+  | 'interior_rear'
+  | 'dash_odo'
+  | 'engine_bay'
+  | 'tyre_fl'
+  | 'tyre_fr'
+  | 'tyre_rl'
+  | 'tyre_rr';
+
+export interface ImageItem {
+  role: ImageRole;        // semantic slot
+  url?: string;           // public or signed URL (dev: /uploads/..)
+  object_key?: string;    // S3 key or local key
+  sha256?: string;        // hex, for integrity
+  w?: number;             // width px
+  h?: number;             // height px
+  captured_ts?: string;   // ISO8601
+}
+
+export interface ImagesManifest {
+  required?: ImageRole[]; // required roles (seeded)
+  items: ImageItem[];     // captured photos
+}
+
+
 export interface PassportBase {
   vin: string;        // 17-char VIN
   lot_id: string;
@@ -40,6 +71,7 @@ export interface PassportBase {
     site?: string;
     ts: string;          // ISO8601
   };
+  images?: ImagesManifest;
 }
 
 export interface PassportSealed extends PassportBase {

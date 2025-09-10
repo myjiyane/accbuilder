@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.dev/schema/lotSeed.schema.json",
+  "type": "object",
+  "required": ["vin", "lot_id"],
+  "additionalProperties": false,
+  "properties": {
+    "vin": { "type": "string", "pattern": "^[A-HJ-NPR-Z0-9]{17}$" },
+    "lot_id": { "type": "string", "minLength": 1 },
+    "required_photos": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "exterior_front_34","exterior_rear_34","left_side","right_side",
+          "interior_front","interior_rear","dash_odo","engine_bay",
+          "tyre_fl","tyre_fr","tyre_rl","tyre_rr"
+        ]
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "notes": { "type": "string" },
+    "metadata": { "type": "object", "additionalProperties": true }
+  }
+}

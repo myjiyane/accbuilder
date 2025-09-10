@@ -1,0 +1,10 @@
+{
+  "vin": "WDD2040082R088866",
+  "lot_id": "WB-POC-001",
+  "required_photos": [
+    "exterior_front_34","exterior_rear_34","left_side","right_side",
+    "interior_front","dash_odo","engine_bay","tyre_fl","tyre_fr","tyre_rl","tyre_rr"
+  ],
+  "notes": "Week-1 POC ingest",
+  "metadata": { "colour": "White", "fuel": "Petrol" }
+}

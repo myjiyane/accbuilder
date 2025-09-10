@@ -1,29 +1,159 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.dev/schema/passportSealed.schema.json",
-  "title": "Vehicle Passport (Sealed)",
+  "title": "WesBank Digital Vehicle Passport (Sealed)",
   "type": "object",
+  "additionalProperties": false,
+  "required": ["vin", "lot_id", "seal"],
+  "properties": {
+    "vin": { "type": "string", "pattern": "^[A-HJ-NPR-Z0-9]{17}$" },
+    "lot_id": { "type": "string", "minLength": 1 },
 
-  "allOf": [
-    { "$ref": "https://example.dev/schema/passportDraft.schema.json" },
-    {
+    "dekra": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "seal": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["hash", "sig", "key_id", "sealed_ts"],
-          "properties": {
-            "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-            "sig":  { "type": "string" },
-            "key_id": { "type": "string" },
-            "sealed_ts": { "type": "string", "format": "date-time" }
+        "url": { "type": "string", "format": "uri" },
+        "inspection_ts": { "type": "string", "format": "date-time" },
+        "site": { "type": "string" }
+      }
+    },
+
+    "odometer": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "km": {
+        "anyOf": [
+          { "type": "number", "minimum": 0 },
+          { "type": "null" }
+        ]
+      },
+      "source": { "type": "string" }
+    }
+  },
+
+    "tyres_mm": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fl": { "oneOf": [ { "type": "number", "minimum": 0, "maximum": 12 }, { "type": "null" } ] },
+        "fr": { "oneOf": [ { "type": "number", "minimum": 0, "maximum": 12 }, { "type": "null" } ] },
+        "rl": { "oneOf": [ { "type": "number", "minimum": 0, "maximum": 12 }, { "type": "null" } ] },
+        "rr": { "oneOf": [ { "type": "number", "minimum": 0, "maximum": 12 }, { "type": "null" } ] }
+      }
+    },
+
+    "dtc": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["green","amber","red","n/a"] },
+        "codes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code"],
+            "properties": {
+              "code": { "type": "string", "pattern": "^[PCBU][0-9A-F]{4}$" },
+              "desc": { "type": "string" }
+            }
           }
         }
-      },
-      "required": ["seal"]
-    }
-  ],
+      }
+    },
 
-  "unevaluatedProperties": false
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ts": { "type": "string", "format": "date-time" },
+        "site": { "oneOf": [ { "type": "string" }, { "type": "null" } ] },
+        "captured_by": { "type": "string" }
+      }
+    },
+
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "exterior_front_34","exterior_rear_34","left_side","right_side",
+              "interior_front","interior_rear","dash_odo","engine_bay",
+              "tyre_fl","tyre_fr","tyre_rl","tyre_rr"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role"],
+            "properties": {
+              "role": {
+                "type": "string",
+                "enum": [
+                  "exterior_front_34","exterior_rear_34","left_side","right_side",
+                  "interior_front","interior_rear","dash_odo","engine_bay",
+                  "tyre_fl","tyre_fr","tyre_rl","tyre_rr"
+                ]
+              },
+              "url": { "type": "string" },
+              "object_key": { "type": "string" },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "w": { "type": "integer", "minimum": 1 },
+              "h": { "type": "integer", "minimum": 1 },
+              "captured_ts": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    },
+
+    "brakes": {
+      "type": "object",
+      "description": "POC: allow flexible brake data (pads, discs, notes).",
+      "additionalProperties": true,
+      "properties": {
+        "pads_mm": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "fl": { "oneOf": [ { "type": "number", "minimum": 0 }, { "type": "null" } ] },
+            "fr": { "oneOf": [ { "type": "number", "minimum": 0 }, { "type": "null" } ] },
+            "rl": { "oneOf": [ { "type": "number", "minimum": 0 }, { "type": "null" } ] },
+            "rr": { "oneOf": [ { "type": "number", "minimum": 0 }, { "type": "null" } ] }
+          }
+        },
+        "service_ts": { "type": "string", "format": "date-time" },
+        "notes": { "type": "string" }
+      }
+    },
+
+    "remarks": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" } }
+      ]
+    },
+
+    "seal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hash", "key_id", "sealed_ts"],
+      "properties": {
+        "hash":  { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "sig":   { "type": "string", "pattern": "^[A-Za-z0-9+/=_-]*$" },
+        "key_id": { "type": "string" },
+        "sealed_ts": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
 }
