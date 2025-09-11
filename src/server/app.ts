@@ -6,8 +6,7 @@ import rateLimit from "express-rate-limit";
 import path from "node:path";
 import pdf from "pdf-parse";
 import crypto from "node:crypto";
-import photosRouter from "./photos";
-
+import { makePhotosRouter } from "./photos.js";
 
 import { createDevStorage } from "./storage.js";
 import type { PassportDraft, PassportSealed } from "../types/passport.js";
@@ -84,6 +83,10 @@ function sanitizeVin(v?: string) {
 // ---------- app ----------
 const app = express();
 const storage = await createDevStorage(DATA_DIR);
+
+const photosRouter = makePhotosRouter(storage);
+app.use(`${API_PREFIX}/intake/photos`, photosRouter);
+app.use("/intake/photos", photosRouter); 
 
 // middlewares
 app.use(cors({ origin: true, credentials: false }));
@@ -316,33 +319,53 @@ function attachRoutes(r: express.Router) {
     }
   });
 
-  // ---- Intake checklist/readiness for a VIN ----
+// ---- Intake checklist/readiness for a VIN ----
   r.get("/intake/checklist/:vin", async (req, res) => {
     const vin = sanitizeVin(req.params.vin);
     const rec = await storage.get(vin);
     if (!rec?.draft && !rec?.sealed) return res.status(404).json({ error: "not_found" });
-    const model = rec.sealed || rec.draft!;
-    const required = model.images?.required || [];
-    const present = new Set((model.images?.items || []).map(i => i.role));
-    const missing = required.filter(role => !present.has(role));
-    const hasDekra = !!model.dekra?.url;
-    const hasOdo  = model.odometer?.km != null;
-    const dtcOk   = !!model.dtc && (model.dtc.status === "green" || (model.dtc.codes?.length || 0) >= 0);
-    const photosOk = missing.length === 0;
 
-    const ready = hasDekra && hasOdo && photosOk; // keep DTC informational for POC
+    const draft = rec.draft;
+    const sealed = rec.sealed;
+
+    // Prefer required roles from the draft (seed), fall back to sealed if needed
+    const required: string[] =
+      (draft?.images?.required?.length ? draft.images.required : sealed?.images?.required) || [];
+
+    // Count photos as the union of sealed + draft items (so new uploads show immediately)
+    const items = [
+      ...(sealed?.images?.items || []),
+      ...(draft?.images?.items || []),
+    ];
+    const presentRoles = new Set(items.map((i) => i.role));
+    const missing = required.filter((r) => !presentRoles.has(r));
+
+    const hasDekra = !!(draft?.dekra?.url || sealed?.dekra?.url);
+    const odoKm = draft?.odometer?.km ?? sealed?.odometer?.km;
+    const hasOdo = odoKm !== undefined && odoKm !== null;
+
+    const dtcStatus = (draft?.dtc?.status || sealed?.dtc?.status || "n/a") as "green" | "amber" | "red" | "n/a";
+
+    // "Ready" means DEKRA + ODO + (if required list exists) all required photos captured
+    const photosOk = required.length > 0 && missing.length === 0;
+    const ready = hasDekra && hasOdo && (required.length === 0 ? false : photosOk);
+
     res.json({
       vin,
-      lot_id: model.lot_id,
+      lot_id: draft?.lot_id || sealed?.lot_id || null,
       checklist: {
-        hasDekra, hasOdo, photosOk, dtcStatus: model.dtc?.status || "n/a",
+        hasDekra,
+        hasOdo,
+        photosOk,
+        dtcStatus,
         requiredCount: required.length,
-        presentCount: present.size,
-        missing
+        presentCount: presentRoles.size,
+        missing,
       },
-      ready
+      ready,
     });
   });
+
 
   // ---- Seal with readiness enforcement (override with ?force=1) ----
   r.post("/passports/seal/strict", async (req, res) => {
