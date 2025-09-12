@@ -298,6 +298,44 @@ function attachRoutes(r: express.Router) {
     res.json({ valid, reasons, hash: hashExpected, key_id: sealed.seal?.key_id || null });
   });
   
+
+  // Initialize/ensure a draft for a new VIN (creates if missing)
+  r.post("/intake/init", async (req, res) => {
+    try {
+      const vin = sanitizeVin(req.body?.vin);
+      const lotId = String(req.body?.lot_id || "WB-POC-001");
+      if (!vin) return res.status(400).json({ error: "vin_required" });
+
+      const rec = await storage.get(vin);
+      const draft = rec?.draft ? { ...rec.draft } : { vin, lot_id: lotId };
+
+      // Optional: accept required photo roles on init
+      if (Array.isArray(req.body?.required_photos)) {
+        draft.images = draft.images || { items: [] };
+        draft.images.required = req.body.required_photos as any;
+      }
+
+      // Optional: accept DEKRA url / odo on init
+      if (typeof req.body?.dekra_url === "string") {
+        draft.dekra = draft.dekra || {};
+        draft.dekra.url = req.body.dekra_url;
+      }
+      if (req.body?.odometer_km != null) {
+        draft.odometer = draft.odometer || {};
+        draft.odometer.km = Number(req.body.odometer_km);
+        if (typeof req.body?.odometer_source === "string") {
+          draft.odometer.source = req.body.odometer_source;
+        }
+      }
+
+      const updated = await storage.upsertDraft(draft);
+      res.json({ ok: true, record: updated });
+    } catch (e: any) {
+      res.status(500).json({ error: "init_failed", message: e?.message || String(e) });
+    }
+  });
+
+
   // ---- Intake seed: set required photos for a VIN/lot ----
   r.post("/intake/seed", async (req, res) => {
     try {
@@ -319,34 +357,48 @@ function attachRoutes(r: express.Router) {
     }
   });
 
-// ---- Intake checklist/readiness for a VIN ----
+  
+  // ---- Intake checklist/readiness for a VIN ----
   r.get("/intake/checklist/:vin", async (req, res) => {
     const vin = sanitizeVin(req.params.vin);
     const rec = await storage.get(vin);
-    if (!rec?.draft && !rec?.sealed) return res.status(404).json({ error: "not_found" });
+
+    if (!rec?.draft && !rec?.sealed) {
+      return res.json({
+        vin,
+        lot_id: null,
+        checklist: {
+          hasDekra: false,
+          hasOdo: false,
+          photosOk: false,
+          dtcStatus: "n/a",
+          requiredCount: 0,
+          presentCount: 0,
+          missing: [] as string[],
+        },
+        ready: false
+      });
+    }
 
     const draft = rec.draft;
     const sealed = rec.sealed;
 
-    // Prefer required roles from the draft (seed), fall back to sealed if needed
     const required: string[] =
       (draft?.images?.required?.length ? draft.images.required : sealed?.images?.required) || [];
 
-    // Count photos as the union of sealed + draft items (so new uploads show immediately)
     const items = [
       ...(sealed?.images?.items || []),
       ...(draft?.images?.items || []),
     ];
+    
     const presentRoles = new Set(items.map((i) => i.role));
     const missing = required.filter((r) => !presentRoles.has(r));
 
     const hasDekra = !!(draft?.dekra?.url || sealed?.dekra?.url);
     const odoKm = draft?.odometer?.km ?? sealed?.odometer?.km;
     const hasOdo = odoKm !== undefined && odoKm !== null;
+    const dtcStatus = (draft?.dtc?.status || sealed?.dtc?.status || "n/a") as "green"|"amber"|"red"|"n/a";
 
-    const dtcStatus = (draft?.dtc?.status || sealed?.dtc?.status || "n/a") as "green" | "amber" | "red" | "n/a";
-
-    // "Ready" means DEKRA + ODO + (if required list exists) all required photos captured
     const photosOk = required.length > 0 && missing.length === 0;
     const ready = hasDekra && hasOdo && (required.length === 0 ? false : photosOk);
 
@@ -365,6 +417,7 @@ function attachRoutes(r: express.Router) {
       ready,
     });
   });
+
 
 
   // ---- Seal with readiness enforcement (override with ?force=1) ----
