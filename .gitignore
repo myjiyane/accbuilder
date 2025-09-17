@@ -6,3 +6,4 @@ dist
 coverage
 data/
 uploads/*.jpg
+samples/photos/*.jpg
