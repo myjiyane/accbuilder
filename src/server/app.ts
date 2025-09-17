@@ -627,7 +627,6 @@ function attachRoutes(r: express.Router) {
     }
   });
 
-  // verify sealed passport
   r.get("/verify", async (req, res) => {
     const vin = sanitizeVin(String(req.query.vin || ""));
     if (!vin) return res.status(400).json({ error: "vin_required" });
@@ -771,6 +770,40 @@ function attachRoutes(r: express.Router) {
       },
       ready,
     });
+  });
+
+
+  r.post("/intake/tyres", async (req, res) => {
+    try {
+      const vin = sanitizeVin(req.body?.vin);
+      const tyres = req.body?.tyres_mm;
+      
+      if (!vin) return res.status(400).json({ error: "vin_required" });
+      if (!tyres || typeof tyres !== 'object') {
+        return res.status(400).json({ error: "tyres_mm_required" });
+      }
+
+      // Validate tyre measurements
+      const validTyre = (val) => val === null || (typeof val === 'number' && val >= 0 && val <= 12);
+      if (!validTyre(tyres.fl) || !validTyre(tyres.fr) || !validTyre(tyres.rl) || !validTyre(tyres.rr)) {
+        return res.status(400).json({ error: "invalid_tyre_measurements" });
+      }
+
+      const rec = await storage.get(vin);
+      const draft = rec?.draft ? { ...rec.draft } : { vin, lot_id: "N/A" };
+      
+      draft.tyres_mm = {
+        fl: tyres.fl,
+        fr: tyres.fr, 
+        rl: tyres.rl,
+        rr: tyres.rr
+      };
+
+      const updated = await storage.upsertDraft(draft);
+      res.json({ ok: true, record: updated });
+    } catch (e) {
+      res.status(500).json({ error: "save_tyres_failed", message: e?.message || String(e) });
+    }
   });
 
   // Seal with readiness enforcement (override with ?force=1)
