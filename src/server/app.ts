@@ -28,6 +28,159 @@ const AWS_REGION = process.env.AWS_REGION || "eu-west-1";
 const TEXTRACT_MAX_FILE_SIZE = Number(process.env.TEXTRACT_MAX_FILE_SIZE);
 const TEXTRACT_CACHE_TTL = Number(process.env.TEXTRACT_CACHE_TTL);
 
+
+
+/** merge consecutive numeric WORDs on the same line (e.g. "12 345" -> "12345") */
+function groupNumericSpans(words: { text: string; conf: number; lineId: string; bbox?: Block["Geometry"] }[]) {
+  const groups: { raw: string; confAvg: number; bbox?: Block["Geometry"]; lineId: string }[] = [];
+  let cur: { parts: string[]; confs: number[]; bbox?: Block["Geometry"]; lineId: string } | null = null;
+
+  const isNumericish = (t: string) => /^[\d.,]+$/.test(t);
+
+  for (const w of words) {
+    if (isNumericish(w.text)) {
+      if (!cur || cur.lineId !== w.lineId) {
+        if (cur) {
+          groups.push({
+            raw: cur.parts.join(""),
+            confAvg: cur.confs.reduce((a, b) => a + b, 0) / cur.confs.length,
+            bbox: cur.bbox,
+            lineId: cur.lineId,
+          });
+        }
+        cur = { parts: [w.text], confs: [w.conf], bbox: w.bbox, lineId: w.lineId };
+      } else {
+        cur.parts.push(w.text);
+        cur.confs.push(w.conf);
+      }
+    } else if (cur) {
+      groups.push({
+        raw: cur.parts.join(""),
+        confAvg: cur.confs.reduce((a, b) => a + b, 0) / cur.confs.length,
+        bbox: cur.bbox,
+        lineId: cur.lineId,
+      });
+      cur = null;
+    }
+  }
+  if (cur) {
+    groups.push({
+      raw: cur.parts.join(""),
+      confAvg: cur.confs.reduce((a, b) => a + b, 0) / cur.confs.length,
+      bbox: cur.bbox,
+      lineId: cur.lineId,
+    });
+  }
+  return groups;
+}
+
+type OdoCand = {
+  value: number;
+  raw: string;
+  score: number;
+  conf: number;
+  bbox?: Block["Geometry"];
+};
+
+function pickBest(cands: OdoCand[]) {
+  if (!cands.length) return null;
+  return [...cands].sort((a, b) => (b.score - a.score) || (b.value - a.value))[0];
+}
+
+
+// ---------- Heuristics / helpers (odometer-focused) ----------
+
+const ws = (s: string) => s.replace(/\s+/g, " ").trim();
+const isTimeLike = (s: string) => /^\d{1,2}[:.]\d{2}$/.test(s);
+const looksLikeSpeed = (s: string) => /\b(km\/h|kmh|mph)\b/i.test(s);
+const digitsOnly = (s: string) => s.replace(/[^\d]/g, "");
+
+
+type OdoCand = {
+  value: number;
+  raw: string;
+  unit: "km" | "mi" | null;
+  score: number;
+  near: string[];
+  lineConf?: number;
+};
+
+function extractOdoCandidates(lines: { text: string; confidence: number }[]): OdoCand[] {
+  const out: OdoCand[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const cur = lines[i];
+    const prev = lines[i - 1];
+    const next = lines[i + 1];
+
+    const curText = ws(cur.text);
+    const neighbor = ws([prev?.text || "", cur.text, next?.text || ""].join(" "));
+
+    // Skip obvious non-odometer contexts
+    if (/\b(TRIP|TRIP\s*A|TRIP\s*B)\b/i.test(neighbor)) continue;
+
+    const hasODO = /\b(ODO|ODOMETER|MILEAGE|KILOMETRAGE|TOTAL)\b/i.test(neighbor);
+    const hasKM = /\bKM\b/i.test(neighbor);
+    const hasMI = /\bMI(?![A-Z])\b/i.test(neighbor) || /\bMILES\b/i.test(neighbor);
+    const hasSpeed = looksLikeSpeed(neighbor);
+
+    // Match 3-6 digits, with optional thousand separators:
+    // 123 • 12,345 • 123,456 • 123.456
+    const re = /\b(\d{1,3}(?:[.,]\d{3}){0,2}|\d{3,6})\b/g;
+    let m: RegExpExecArray | null;
+
+    while ((m = re.exec(curText))) {
+      const raw = m[1];
+
+      if (isTimeLike(raw)) continue;
+
+      const canonical = raw.replace(/[.,](?=\d{3}\b)/g, ""); // strip thousand separators
+      const n = parseInt(digitsOnly(canonical), 10);
+      if (!Number.isFinite(n)) continue;
+
+      // Reasonable odometer range (adjustable)
+      const MAX = Number(process.env.MAX_ODOMETER || 1500000);
+      if (n < 50 || n > MAX) continue;
+
+      if (hasSpeed) continue; // avoid km/h, mph contexts
+
+      let unit: "km" | "mi" | null = null;
+      if (hasKM) unit = "km";
+      else if (hasMI) unit = "mi";
+
+      // Scoring
+      let score = 0;
+      // base: OCR confidence
+      score += Math.min(10, Math.floor((cur.confidence || 80) / 10));
+      // proximity to cues
+      if (hasODO) score += 8;
+      if (unit === "km") score += 4;
+      if (unit === "mi") score += 3;
+      // prefer bigger plausible odometers
+      if (n >= 10000) score += 2;
+      if (n >= 100000) score += 1;
+      // slight penalty if "TRIP" is around (we already skipped most)
+      if (/\bTRIP\b/i.test(neighbor)) score -= 2;
+
+      const near: string[] = [];
+      if (hasODO) near.push("ODO");
+      if (hasKM) near.push("KM");
+      if (hasMI) near.push("MI");
+      if (hasSpeed) near.push("SPEED");
+
+      out.push({ value: n, raw, unit, score, near, lineConf: cur.confidence });
+    }
+  }
+
+  return out;
+}
+
+function pickBestOdo(cands: OdoCand[]): OdoCand | null {
+  if (!cands.length) return null;
+  return [...cands].sort((a, b) => (b.score - a.score) || (b.value - a.value))[0];
+}
+
+
 // ---------- AWS Configuration ----------
 function validateAwsConfig(): boolean {
   const required = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'];
@@ -322,7 +475,7 @@ function attachRoutes(r: express.Router) {
     });
   });
 
-  // Enhanced OCR VIN extraction endpoint
+  
   r.post("/ocr/vin", upload.single("file"), async (req, res) => {
     const startTime = Date.now();
     metrics.totalRequests++;
@@ -690,6 +843,221 @@ function attachRoutes(r: express.Router) {
       res.status(500).json({ error: "init_failed", message: e?.message || String(e) });
     }
   });
+  
+  
+  // ---------- Route ----------
+  r.post("/ocr/odometer", upload.single("file"), async (req, res) => {
+    const startTime = Date.now();
+    metrics.totalRequests++;
+
+    try {
+      // --- validation (same pattern as /ocr/vin) ---
+      const buf = req.file?.buffer;
+      if (!buf?.length) return res.status(400).json({ error: "no_file", message: "No image file provided" });
+      if (!hasAwsConfig) return res.status(503).json({ error: "aws_not_configured", message: "AWS Textract not configured" });
+      if (buf.length > TEXTRACT_MAX_FILE_SIZE) {
+        return res.status(400).json({
+          error: "file_too_large",
+          message: `File size exceeds ${TEXTRACT_MAX_FILE_SIZE / 1024 / 1024}MB limit`,
+        });
+      }
+      const allowed = ["image/jpeg", "image/png", "image/tiff", "image/webp"];
+      if (!req.file?.mimetype || !allowed.includes(req.file.mimetype)) {
+        return res.status(400).json({ error: "invalid_file_type", message: "Only JPEG, PNG, TIFF, WebP supported" });
+      }
+
+      // --- cache ---
+      const imageHash = getImageHash(buf);
+      const cacheKey = `odo:v2:${imageHash}`;
+      const cached = ocrCache.get(cacheKey);
+      if (cached) {
+        const processingTime = Date.now() - startTime;
+        metrics.cacheHits++;
+        return res.json({ ...(cached as any), fromCache: true, processingTime });
+      }
+
+      // --- preprocess & Textract ---
+      const processed = await preprocessImageForOcr(buf); // you already have this
+      const client = getTextractClient();
+      if (!client) throw new Error("Textract client not available");
+
+      const tex = await client.send(new DetectDocumentTextCommand({ Document: { Bytes: processed } }));
+      const blocks = tex.Blocks || [];
+
+      // Collect LINES and WORDS with minimal geometry
+      type Line = { id: string; text: string; conf: number; bbox?: Block["Geometry"] };
+      const lines: Line[] = [];
+      const words: { text: string; conf: number; lineId: string; bbox?: Block["Geometry"] }[] = [];
+
+      const idToLine: Record<string, string> = {};
+      for (const b of blocks) {
+        if (b.BlockType === "LINE" && b.Id && b.Text) {
+          lines.push({ id: b.Id, text: b.Text, conf: b.Confidence ?? 80, bbox: b.Geometry });
+          idToLine[b.Id] = b.Id;
+        }
+      }
+      // relate WORD->LINE if relationships exist
+      const lineIds = new Set(lines.map((l) => l.id));
+      for (const b of blocks) {
+        if (b.BlockType === "WORD" && b.Text && b.Confidence) {
+          let parentLineId = "";
+          for (const rel of b.Relationships || []) {
+            if (rel.Type === "CHILD") continue;
+            for (const id of rel.Ids || []) {
+              if (lineIds.has(id)) parentLineId = id;
+            }
+          }
+          // if we didn’t find a parent line, it’s still okay – we’ll ignore grouping for that token
+          words.push({ text: b.Text, conf: b.Confidence, lineId: parentLineId, bbox: b.Geometry });
+        }
+      }
+
+      // Build text for diagnostics
+      const allText = ws(lines.map((l) => l.text).join("\n"));
+      const lineCount = lines.length;
+
+      // --- Extract numeric candidates ---
+      const numericGroups = groupNumericSpans(words);
+      const MIN = Number(process.env.MIN_ODOMETER || 50);        // allow low test numbers like 5490; tweak if you want 100+
+      const MAX = Number(process.env.MAX_ODOMETER || 1500000);   // upper bound
+
+      const candidates: OdoCand[] = [];
+
+      // 1) from numeric WORD groups (handles "5 5490" -> "55490" but will still score "5490" from lines below)
+      for (const g of numericGroups) {
+        const raw = g.raw.replace(/[.,](?=\d{3}\b)/g, ""); // remove thousand separators
+        const dn = digitsOnly(raw);
+        const n = parseInt(dn, 10);
+        if (!Number.isFinite(n)) continue;
+        if (isTimeLike(raw)) continue;
+        if (n < MIN || n > MAX) continue;
+
+        // size/position score from bounding box (0..1 image coords)
+        const bb = g.bbox?.BoundingBox;
+        const h = bb?.Height ?? 0;
+        const w = bb?.Width ?? 0;
+        const cx = (bb?.Left ?? 0) + w / 2;
+        const cy = (bb?.Top ?? 0) + h / 2;
+
+        const sizeScore = Math.min(10, (h * 40) + (w * 10)); // emphasize tall digits
+        const centerDist = Math.hypot(cx - 0.5, cy - 0.5);   // 0..~0.7
+        const centerScore = Math.max(0, 1 - centerDist * 1.6) * 6; // 0..6
+
+        // base on OCR conf and digit length
+        const confScore = Math.min(10, (g.confAvg || 80) / 10);
+        const digitsScore = Math.min(8, Math.max(0, (dn.length - 2) * 2)); // prefer 4–6 digits
+
+        const score = confScore + digitsScore + sizeScore + centerScore;
+
+        candidates.push({
+          value: n,
+          raw: g.raw,
+          score,
+          conf: g.confAvg || 80,
+          bbox: g.bbox,
+        });
+      }
+
+      // 2) fallback: parse numeric spans directly from high-conf LINES (also catches “5490” cleanly)
+      for (const ln of lines) {
+        const text = ws(ln.text);
+        if (looksLikeSpeed(text) || /\bTRIP\b/i.test(text)) continue;
+
+        const re = /\b(\d{1,3}(?:[.,]\d{3}){0,2}|\d{3,7})\b/g; // allow up to 7 digits
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(text))) {
+          const raw = m[1];
+          if (isTimeLike(raw)) continue;
+
+          const dn = digitsOnly(raw.replace(/[.,](?=\d{3}\b)/g, ""));
+          const n = parseInt(dn, 10);
+          if (!Number.isFinite(n)) continue;
+          if (n < MIN || n > MAX) continue;
+
+          const bb = ln.bbox?.BoundingBox;
+          const h = bb?.Height ?? 0;
+          const w = bb?.Width ?? 0;
+          const cx = (bb?.Left ?? 0) + w / 2;
+          const cy = (bb?.Top ?? 0) + h / 2;
+
+          const sizeScore = Math.min(10, (h * 40) + (w * 10));
+          const centerDist = Math.hypot(cx - 0.5, cy - 0.5);
+          const centerScore = Math.max(0, 1 - centerDist * 1.6) * 6;
+
+          const confScore = Math.min(10, (ln.conf || 80) / 10);
+          const digitsScore = Math.min(8, Math.max(0, (dn.length - 2) * 2));
+
+          const score = confScore + digitsScore + sizeScore + centerScore;
+
+          candidates.push({
+            value: n,
+            raw,
+            score,
+            conf: ln.conf || 80,
+            bbox: ln.bbox,
+          });
+        }
+      }
+
+      // Finally: choose the most plausible number
+      const best = pickBest(candidates);
+      const processingTime = Date.now() - startTime;
+
+      // metrics (mirror your pattern)
+      metrics.successfulRequests++;
+      if ((metrics as any).odoDetectionRate == null) (metrics as any).odoDetectionRate = 0;
+      (metrics as any).odoDetectionRate =
+        ((metrics as any).odoDetectionRate * (metrics.successfulRequests - 1) + (best ? 1 : 0)) /
+        metrics.successfulRequests;
+      metrics.averageProcessingTime =
+        (metrics.averageProcessingTime * (metrics.successfulRequests - 1) + processingTime) /
+        metrics.successfulRequests;
+
+      const payload = {
+        ok: true,
+        km: best ? best.value : null,     // SA app → km only
+        unit: "km" as const,
+        candidates: candidates
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 6)
+          .map((c) => ({ value: c.value, score: Math.round(c.score * 10) / 10 })),
+        confidence: best ? Math.round(Math.min(1, (best.conf / 100) * (best.score / 18)) * 100) / 100 : 0, // 0..1
+        processingTime,
+        textExtracted: allText.length > 0,
+        totalBlocks: blocks.length,
+        lineCount,
+        fromCache: false,
+      };
+
+      ocrCache.set(cacheKey, payload);
+      return res.json(payload);
+    } catch (error: any) {
+      const processingTime = Date.now() - startTime;
+      console.error("[/ocr/odometer v2] Textract error:", {
+        error: error.message,
+        code: error.code,
+        requestId: error.$metadata?.requestId,
+        processingTime,
+      });
+
+      if (error.name === "InvalidParameterException") {
+        return res.status(400).json({ error: "invalid_image", message: "Unsupported/corrupted image", processingTime });
+      }
+      if (error.name === "ProvisionedThroughputExceededException") {
+        return res.status(429).json({ error: "rate_limit_exceeded", message: "Too many requests", processingTime });
+      }
+      if (error.code === "UnauthorizedOperation" || error.code === "AccessDenied") {
+        return res.status(500).json({ error: "aws_auth_error", message: "AWS credentials error", processingTime });
+      }
+      return res.status(500).json({
+        error: "textract_failed",
+        message: "OCR processing failed",
+        processingTime,
+        details: process.env.NODE_ENV === "development" ? error.message : undefined,
+      });
+    }
+  });
+
 
   // Intake seed: set required photos for a VIN/lot
   r.post("/intake/seed", async (req, res) => {
