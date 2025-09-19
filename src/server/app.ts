@@ -319,6 +319,206 @@ function isValidVin(vin: string): boolean {
   return vin[8] === expectedCheck;
 }
 
+function findOdometerCandidates(text: string, words: any[]): OdoCand[] {
+  const candidates: OdoCand[] = [];
+  
+  // Common odometer indicators
+  const odometerKeywords = /\b(km|miles|mi|odometer|odo|total|mileage)\b/i;
+  const speedKeywords = /\b(km\/h|mph|speed|kph)\b/i;
+  
+  // Look for numbers near odometer keywords
+  const lines = text.split('\n');
+  for (const line of lines) {
+    if (speedKeywords.test(line)) continue; // Skip speed readings
+    
+    // Prioritize lines with odometer indicators
+    const hasOdoKeyword = odometerKeywords.test(line);
+    const priorityMultiplier = hasOdoKeyword ? 1.5 : 1.0;
+    
+    // Enhanced odometer number patterns
+    const patterns = [
+      /\b(\d{1,3}[,.\s]?\d{3}[,.\s]?\d{3})\b/g, // 123,456,789 or 123.456.789
+      /\b(\d{4,7})\b/g, // 12345 to 1234567
+      /(\d+)\s*km\b/gi, // "147895 km"
+    ];
+    
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(line)) !== null) {
+        const raw = match[1];
+        const cleaned = raw.replace(/[,.\s]/g, '');
+        const value = parseInt(cleaned, 10);
+        
+        if (isValidOdometerReading(value)) {
+          candidates.push({
+            value,
+            raw,
+            score: calculateOdometerScore(value, raw, hasOdoKeyword) * priorityMultiplier,
+            source: 'text_pattern'
+          });
+        }
+      }
+    }
+  }
+  
+  return candidates;
+}
+
+
+// Helper function to extract odometer readings from individual lines
+function extractOdometerFromLine(text: string, confidence: number, bbox: any): Array<{
+  value: number;
+  raw: string; 
+  score: number;
+  confidence: number;
+  source: string;
+}> {
+  const candidates = [];
+  
+  // Skip obvious non-odometer lines
+  if (looksLikeSpeedometer(text) || /trip|time|temp/i.test(text)) {
+    return candidates;
+  }
+
+  // Enhanced patterns for dashboard displays
+  const patterns = [
+    /\b(\d{1,3}[,.\s]?\d{3}[,.\s]?\d{3})\b/g, // 123,456,789
+    /\b(\d{4,7})\b/g, // 12345 to 1234567
+    /(\d+)\s*km\b/gi, // "147895 km"
+    /(\d{1,3}(?:[,.\s]\d{3})+)\b/g, // Various thousand separators
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const raw = match[1];
+      const cleaned = raw.replace(/[,.\s]/g, '');
+      const value = parseInt(cleaned, 10);
+      
+      if (isValidOdometerReading(value)) {
+        const hasOdometerKeyword = looksLikeSpeedometer(text);
+        const score = calculateOdometerScore(value, raw, hasOdometerKeyword);
+        
+        candidates.push({
+          value,
+          raw,
+          score,
+          confidence,
+          source: 'line_extraction'
+        });
+      }
+    }
+  }
+
+  return candidates;
+}
+
+// Helper function to group consecutive digit words (for separated displays)
+function groupConsecutiveDigits(words: Array<{text: string; confidence: number; bbox: any}>): Array<{
+  value: number;
+  raw: string;
+  score: number; 
+  confidence: number;
+  source: string;
+}> {
+  const candidates = [];
+  
+  // Look for sequences of single digits that might be separated odometer readings
+  const digitWords = words.filter(w => /^\d{1,3}$/.test(w.text) && w.confidence > 60);
+  
+  for (let i = 0; i < digitWords.length - 2; i++) {
+    const sequence = [];
+    let j = i;
+    
+    // Try to build a sequence of 4-7 digits
+    while (j < digitWords.length && sequence.length < 7) {
+      if (/^\d{1,3}$/.test(digitWords[j].text)) {
+        sequence.push(digitWords[j]);
+        j++;
+      } else {
+        break;
+      }
+    }
+    
+    if (sequence.length >= 4) {
+      const combined = sequence.map(s => s.text).join('');
+      const value = parseInt(combined, 10);
+      const avgConfidence = sequence.reduce((sum, s) => sum + s.confidence, 0) / sequence.length;
+      
+      if (isValidOdometerReading(value)) {
+        candidates.push({
+          value,
+          raw: sequence.map(s => s.text).join(' '),
+          score: calculateOdometerScore(value, combined, false, avgConfidence) + 2, // Bonus for grouped digits
+          confidence: avgConfidence,
+          source: 'digit_grouping'
+        });
+      }
+    }
+  }
+  
+  return candidates;
+}
+
+function removeDuplicateReadings(candidates: Array<{value: number; raw: string; score: number; confidence: number; source: string}>) {
+  const seen = new Map();
+  const unique = [];
+  
+  for (const candidate of candidates) {
+    const key = candidate.value;
+    if (!seen.has(key) || seen.get(key).score < candidate.score) {
+      seen.set(key, candidate);
+    }
+  }
+  
+  return Array.from(seen.values());
+}
+
+// Helper function to detect speedometer readings
+function looksLikeSpeedometer(text: string): boolean {
+  return /\b(km\/h|mph|kph|speed)\b/i.test(text) || /\b[0-9]{1,3}\s*(km\/h|mph)\b/i.test(text);
+}
+
+
+function isValidOdometerReading(value: number): boolean {
+  // Reasonable odometer ranges for different vehicle types
+  const MIN_ODO = 0; // Allow brand new vehicles
+  const MAX_ODO = 2000000; // 2M km is extremely high but possible for commercial vehicles
+  
+  if (value < MIN_ODO || value > MAX_ODO) return false;
+  
+  // Filter out obviously wrong readings
+  if (value < 10 && value > 0) return false; // Too low for real odometer
+  if (String(value).length === 1) return false; // Single digits unlikely
+  
+  return true;
+}
+
+
+function calculateOdometerScore(value: number, raw: string, hasKeyword: boolean): number {
+  let score = 0;
+  
+  // Length scoring (odometers typically 4-7 digits)
+  const digits = String(value).length;
+  if (digits >= 4 && digits <= 6) score += 10;
+  else if (digits === 3 || digits === 7) score += 5;
+  else score += 1;
+  
+  // Keyword proximity bonus
+  if (hasKeyword) score += 8;
+  
+  // Common odometer patterns
+  if (value >= 1000 && value <= 500000) score += 5; // Most common range
+  if (value % 1000 === 0) score -= 2; // Round thousands less likely
+  if (raw.includes(',') || raw.includes('.')) score += 3; // Formatted numbers
+  
+  // Penalize time-like patterns
+  if (raw.includes(':')) score -= 10;
+  if (/^\d{1,2}:\d{2}/.test(raw)) score -= 15;
+  
+  return score;
+}
+
 function findVinCandidates(text: string): string[] {
   const U = text.toUpperCase();
   const CHUNKY = /(?:[A-Z0-9][ -]?){11,25}/g;
@@ -357,7 +557,259 @@ function findBestVinCandidate(candidates: string[]): string | null {
   return candidates.length > 0 ? candidates[0] : null;
 }
 
-// ---------- Image Processing ----------
+
+async function preprocessImageForOdometer(buffer: Buffer): Promise<Buffer> {
+  try {
+    // Dashboard-specific preprocessing for digital displays
+    return await sharp(buffer)
+      // Resize to optimal dimensions for dashboard text
+      .resize(1600, 1200, { 
+        fit: 'inside', 
+        withoutEnlargement: true 
+      })
+      // Convert to grayscale first to reduce color noise from backlit displays
+      .grayscale()
+      // Increase contrast significantly for backlit LCD/LED displays
+      .normalize({ lower: 5, upper: 95 })
+      // Apply gamma correction to handle bright backlighting
+      .gamma(1.4)
+      // Enhance edges to sharpen segmented digital characters
+      .sharpen({ sigma: 1.2, m1: 1.0, m2: 0.2, x1: 2, y2: 10, y3: 20 })
+      // Apply unsharp mask for better character definition
+      .modulate({ brightness: 1.1, saturation: 0.8 })
+      // Convert back to high-quality JPEG
+      .jpeg({ quality: 95, progressive: true })
+      .toBuffer();
+  } catch (error) {
+    console.warn('Odometer preprocessing failed, using original:', error);
+    return buffer;
+  }
+}
+
+async function preprocessImageForLicenceDisc(buffer: Buffer): Promise<Buffer> {
+  try {
+    return await sharp(buffer)
+      // Higher resolution for tiny licence disc text
+      .resize(2800, 2100, { 
+        fit: 'inside', 
+        withoutEnlargement: true 
+      })
+      // Multi-step glare reduction for windshield reflections
+      .modulate({ brightness: 0.85, saturation: 1.3, hue: 0 })
+      // Gaussian blur then sharpen to reduce noise while preserving text
+      .blur(0.3)
+      .sharpen({ sigma: 2.0, m1: 1.5, m2: 0.4, x1: 4, y2: 20, y3: 30 })
+      // Stronger contrast for small text
+      .normalize({ lower: 1, upper: 99 })
+      // Adaptive gamma for reflective surfaces
+      .gamma(1.35)
+      // Convert to grayscale to eliminate color distractions
+      .grayscale()
+      // Morphological operations to clean up character edges
+      .threshold(128) // Binarize
+      .negate() // Invert for better character definition
+      .dilate() // Slightly thicken characters
+      .erode() // Then thin them back to original width
+      .negate() // Invert back
+      // Final enhancement
+      .normalize()
+      .sharpen({ sigma: 1.0, m1: 2.0 })
+      .jpeg({ quality: 99, progressive: true })
+      .toBuffer();
+  } catch (error) {
+    console.warn('Enhanced licence disc preprocessing failed, using original:', error);
+    return buffer;
+  }
+}
+
+
+function findVinFromLicenceDisc(text: string, lines: any[], words: any[]): Array<{
+  vin: string;
+  raw: string;
+  score: number;
+  confidence: number;
+  position: string;
+}> {
+  const candidates = [];
+  const allText = text.toUpperCase();
+  
+  // Enhanced SA licence disc VIN indicators with better capture groups
+  const vinKeywords = [
+    /(?:CHASSIS\s*NO?[:.]?\s*)([A-HJ-NPR-Z0-9]{17})(?![A-HJ-NPR-Z0-9])/i,
+    /(?:VIN[:.]?\s*)([A-HJ-NPR-Z0-9]{17})(?![A-HJ-NPR-Z0-9])/i,
+    /(?:VEHICLE\s*ID[:.]?\s*)([A-HJ-NPR-Z0-9]{17})(?![A-HJ-NPR-Z0-9])/i,
+  ];
+
+  // Method 1: Enhanced keyword matching with exact 17-character extraction
+  for (const pattern of vinKeywords) {
+    const match = allText.match(pattern);
+    if (match && match[1] && match[1].length === 17) {
+      const vin = match[1];
+      if (isValidVin(vin)) {
+        candidates.push({
+          vin,
+          raw: match[0],
+          score: 25,
+          confidence: 95,
+          position: 'keyword_match'
+        });
+      }
+    }
+  }
+
+  // Method 2: Clean 17-character pattern extraction
+  // This handles cases like "VIN 252DDFDFEF5452125" more precisely
+  const cleanVinPattern = /\b([A-HJ-NPR-Z0-9]{17})\b/g;
+  let match;
+  while ((match = cleanVinPattern.exec(allText)) !== null) {
+    const vin = match[1];
+    
+    // Ensure it's exactly 17 characters and valid
+    if (vin.length === 17 && isValidVin(vin)) {
+      // Check if already found by keyword method
+      const alreadyFound = candidates.some(c => c.vin === vin);
+      if (!alreadyFound) {
+        candidates.push({
+          vin,
+          raw: match[0],
+          score: 20,
+          confidence: 85,
+          position: 'pattern_match'
+        });
+      }
+    }
+  }
+
+  // Method 3: Line-by-line extraction with space removal for curved text
+  for (const line of lines) {
+    const lineText = line.text.replace(/\s/g, ''); // Remove all spaces
+    
+    // Look for exactly 17 consecutive valid VIN characters
+    const vinInLine = lineText.match(/([A-HJ-NPR-Z0-9]{17})/g);
+    if (vinInLine) {
+      for (const vin of vinInLine) {
+        if (vin.length === 17 && isValidVin(vin)) {
+          const alreadyFound = candidates.some(c => c.vin === vin);
+          if (!alreadyFound) {
+            candidates.push({
+              vin,
+              raw: line.text,
+              score: 18,
+              confidence: line.confidence || 80,
+              position: 'line_extraction'
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Method 4: Handle broken VINs with exact 17-character validation
+  const reconstructedVins = reconstructBrokenVinExact(lines);
+  candidates.push(...reconstructedVins);
+
+  return candidates.sort((a, b) => b.score - a.score);
+}
+
+
+function findVinByPosition(lines: any[], words: any[]): Array<{
+  vin: string;
+  raw: string;
+  score: number;
+  confidence: number;
+  position: string;
+}> {
+  const candidates = [];
+  
+  // SA licence disc layout: VIN usually in middle-to-lower area
+  // Filter lines by vertical position (0.4 to 0.8 of image height)
+  const middleLowerLines = lines.filter(line => {
+    if (!line.bbox?.BoundingBox) return true; // Include if no position data
+    const y = line.bbox.BoundingBox.Top + (line.bbox.BoundingBox.Height / 2);
+    return y >= 0.4 && y <= 0.8;
+  });
+
+  for (const line of middleLowerLines) {
+    const text = line.text.replace(/\s/g, ''); // Remove spaces from curved text
+    
+    // Look for 17-character sequences
+    const vinMatches = text.match(/[A-HJ-NPR-Z0-9]{17}/g);
+    if (vinMatches) {
+      for (const vin of vinMatches) {
+        if (isValidVin(vin)) {
+          // Calculate position score
+          const bbox = line.bbox?.BoundingBox;
+          const centerY = bbox ? bbox.Top + (bbox.Height / 2) : 0.6;
+          const centerX = bbox ? bbox.Left + (bbox.Width / 2) : 0.5;
+          
+          // Prefer center-middle positions (typical VIN location)
+          const positionScore = calculateLicenceDiscPositionScore(centerX, centerY);
+          
+          candidates.push({
+            vin,
+            raw: line.text,
+            score: 20 + positionScore,
+            confidence: line.confidence || 80,
+            position: `center_${centerX.toFixed(2)}_${centerY.toFixed(2)}`
+          });
+        }
+      }
+    }
+  }
+
+  return candidates;
+}
+
+
+function calculateLicenceDiscPositionScore(x: number, y: number): number {
+  // Optimal VIN position on SA licence disc (center-middle to lower-center)
+  const optimalX = 0.5; // Center horizontally
+  const optimalY = 0.65; // Slightly below center vertically
+  
+  const distanceFromOptimal = Math.sqrt(
+    Math.pow(x - optimalX, 2) + Math.pow(y - optimalY, 2)
+  );
+  
+  // Score decreases with distance from optimal position
+  return Math.max(0, 10 - (distanceFromOptimal * 15));
+}
+
+function reconstructBrokenVinExact(lines: any[]): Array<{
+  vin: string;
+  raw: string;
+  score: number;
+  confidence: number;
+  position: string;
+}> {
+  const candidates = [];
+  
+  for (let i = 0; i < lines.length - 1; i++) {
+    const line1 = lines[i];
+    const line2 = lines[i + 1];
+    
+    // Combine and clean text
+    const combined = (line1.text + line2.text).replace(/\s/g, '');
+    
+    // Extract exactly 17 characters
+    const vinMatch = combined.match(/([A-HJ-NPR-Z0-9]{17})/);
+    
+    if (vinMatch && vinMatch[1].length === 17 && isValidVin(vinMatch[1])) {
+      const avgConfidence = (line1.confidence + line2.confidence) / 2;
+      
+      candidates.push({
+        vin: vinMatch[1],
+        raw: `${line1.text} + ${line2.text}`,
+        score: 18,
+        confidence: avgConfidence,
+        position: 'reconstructed_exact'
+      });
+    }
+  }
+  
+  return candidates;
+}
+
+// ---------- VIN Image Processing ----------
 async function preprocessImageForOcr(buffer: Buffer): Promise<Buffer> {
   try {
     // Enhance image for better OCR results
@@ -532,9 +984,9 @@ function attachRoutes(r: express.Router) {
           processingTime: Date.now() - startTime
         });
       }
-
-      // Preprocess image for better OCR
-      const processedBuffer = await preprocessImageForOcr(buf);
+     
+      // Preprocess image for VIN displays
+      const processedBuffer = await preprocessImageForLicenceDisc(buf)
       
       const client = getTextractClient();
       if (!client) {
@@ -847,216 +1299,204 @@ function attachRoutes(r: express.Router) {
   
   // ---------- Route ----------
   r.post("/ocr/odometer", upload.single("file"), async (req, res) => {
-    const startTime = Date.now();
-    metrics.totalRequests++;
+      const startTime = Date.now();
+      metrics.totalRequests++;
 
-    try {
-      // --- validation (same pattern as /ocr/vin) ---
-      const buf = req.file?.buffer;
-      if (!buf?.length) return res.status(400).json({ error: "no_file", message: "No image file provided" });
-      if (!hasAwsConfig) return res.status(503).json({ error: "aws_not_configured", message: "AWS Textract not configured" });
-      if (buf.length > TEXTRACT_MAX_FILE_SIZE) {
-        return res.status(400).json({
-          error: "file_too_large",
-          message: `File size exceeds ${TEXTRACT_MAX_FILE_SIZE / 1024 / 1024}MB limit`,
-        });
-      }
-      const allowed = ["image/jpeg", "image/png", "image/tiff", "image/webp"];
-      if (!req.file?.mimetype || !allowed.includes(req.file.mimetype)) {
-        return res.status(400).json({ error: "invalid_file_type", message: "Only JPEG, PNG, TIFF, WebP supported" });
-      }
-
-      // --- cache ---
-      const imageHash = getImageHash(buf);
-      const cacheKey = `odo:v2:${imageHash}`;
-      const cached = ocrCache.get(cacheKey);
-      if (cached) {
-        const processingTime = Date.now() - startTime;
-        metrics.cacheHits++;
-        return res.json({ ...(cached as any), fromCache: true, processingTime });
-      }
-
-      // --- preprocess & Textract ---
-      const processed = await preprocessImageForOcr(buf); // you already have this
-      const client = getTextractClient();
-      if (!client) throw new Error("Textract client not available");
-
-      const tex = await client.send(new DetectDocumentTextCommand({ Document: { Bytes: processed } }));
-      const blocks = tex.Blocks || [];
-
-      // Collect LINES and WORDS with minimal geometry
-      type Line = { id: string; text: string; conf: number; bbox?: Block["Geometry"] };
-      const lines: Line[] = [];
-      const words: { text: string; conf: number; lineId: string; bbox?: Block["Geometry"] }[] = [];
-
-      const idToLine: Record<string, string> = {};
-      for (const b of blocks) {
-        if (b.BlockType === "LINE" && b.Id && b.Text) {
-          lines.push({ id: b.Id, text: b.Text, conf: b.Confidence ?? 80, bbox: b.Geometry });
-          idToLine[b.Id] = b.Id;
-        }
-      }
-      // relate WORD->LINE if relationships exist
-      const lineIds = new Set(lines.map((l) => l.id));
-      for (const b of blocks) {
-        if (b.BlockType === "WORD" && b.Text && b.Confidence) {
-          let parentLineId = "";
-          for (const rel of b.Relationships || []) {
-            if (rel.Type === "CHILD") continue;
-            for (const id of rel.Ids || []) {
-              if (lineIds.has(id)) parentLineId = id;
-            }
-          }
-          // if we didn’t find a parent line, it’s still okay – we’ll ignore grouping for that token
-          words.push({ text: b.Text, conf: b.Confidence, lineId: parentLineId, bbox: b.Geometry });
-        }
-      }
-
-      // Build text for diagnostics
-      const allText = ws(lines.map((l) => l.text).join("\n"));
-      const lineCount = lines.length;
-
-      // --- Extract numeric candidates ---
-      const numericGroups = groupNumericSpans(words);
-      const MIN = Number(process.env.MIN_ODOMETER || 50);        // allow low test numbers like 5490; tweak if you want 100+
-      const MAX = Number(process.env.MAX_ODOMETER || 1500000);   // upper bound
-
-      const candidates: OdoCand[] = [];
-
-      // 1) from numeric WORD groups (handles "5 5490" -> "55490" but will still score "5490" from lines below)
-      for (const g of numericGroups) {
-        const raw = g.raw.replace(/[.,](?=\d{3}\b)/g, ""); // remove thousand separators
-        const dn = digitsOnly(raw);
-        const n = parseInt(dn, 10);
-        if (!Number.isFinite(n)) continue;
-        if (isTimeLike(raw)) continue;
-        if (n < MIN || n > MAX) continue;
-
-        // size/position score from bounding box (0..1 image coords)
-        const bb = g.bbox?.BoundingBox;
-        const h = bb?.Height ?? 0;
-        const w = bb?.Width ?? 0;
-        const cx = (bb?.Left ?? 0) + w / 2;
-        const cy = (bb?.Top ?? 0) + h / 2;
-
-        const sizeScore = Math.min(10, (h * 40) + (w * 10)); // emphasize tall digits
-        const centerDist = Math.hypot(cx - 0.5, cy - 0.5);   // 0..~0.7
-        const centerScore = Math.max(0, 1 - centerDist * 1.6) * 6; // 0..6
-
-        // base on OCR conf and digit length
-        const confScore = Math.min(10, (g.confAvg || 80) / 10);
-        const digitsScore = Math.min(8, Math.max(0, (dn.length - 2) * 2)); // prefer 4–6 digits
-
-        const score = confScore + digitsScore + sizeScore + centerScore;
-
-        candidates.push({
-          value: n,
-          raw: g.raw,
-          score,
-          conf: g.confAvg || 80,
-          bbox: g.bbox,
-        });
-      }
-
-      // 2) fallback: parse numeric spans directly from high-conf LINES (also catches “5490” cleanly)
-      for (const ln of lines) {
-        const text = ws(ln.text);
-        if (looksLikeSpeed(text) || /\bTRIP\b/i.test(text)) continue;
-
-        const re = /\b(\d{1,3}(?:[.,]\d{3}){0,2}|\d{3,7})\b/g; // allow up to 7 digits
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(text))) {
-          const raw = m[1];
-          if (isTimeLike(raw)) continue;
-
-          const dn = digitsOnly(raw.replace(/[.,](?=\d{3}\b)/g, ""));
-          const n = parseInt(dn, 10);
-          if (!Number.isFinite(n)) continue;
-          if (n < MIN || n > MAX) continue;
-
-          const bb = ln.bbox?.BoundingBox;
-          const h = bb?.Height ?? 0;
-          const w = bb?.Width ?? 0;
-          const cx = (bb?.Left ?? 0) + w / 2;
-          const cy = (bb?.Top ?? 0) + h / 2;
-
-          const sizeScore = Math.min(10, (h * 40) + (w * 10));
-          const centerDist = Math.hypot(cx - 0.5, cy - 0.5);
-          const centerScore = Math.max(0, 1 - centerDist * 1.6) * 6;
-
-          const confScore = Math.min(10, (ln.conf || 80) / 10);
-          const digitsScore = Math.min(8, Math.max(0, (dn.length - 2) * 2));
-
-          const score = confScore + digitsScore + sizeScore + centerScore;
-
-          candidates.push({
-            value: n,
-            raw,
-            score,
-            conf: ln.conf || 80,
-            bbox: ln.bbox,
+      try {
+        const buf = req.file?.buffer;
+        if (!buf?.length) return res.status(400).json({ error: "no_file", message: "No image file provided" });
+        if (!hasAwsConfig) return res.status(503).json({ error: "aws_not_configured", message: "AWS Textract not configured" });
+        if (buf.length > TEXTRACT_MAX_FILE_SIZE) {
+          return res.status(400).json({
+            error: "file_too_large",
+            message: `File size exceeds ${TEXTRACT_MAX_FILE_SIZE / 1024 / 1024}MB limit`,
           });
         }
+        const allowed = ["image/jpeg", "image/png", "image/tiff", "image/webp"];
+        if (!req.file?.mimetype || !allowed.includes(req.file.mimetype)) {
+          return res.status(400).json({ error: "invalid_file_type", message: "Only JPEG, PNG, TIFF, WebP supported" });
+        }
+
+        console.log(`Processing odometer image: ${req.file.mimetype}, size: ${buf.length} bytes`);
+
+        // --- Cache ---
+        const imageHash = getImageHash(buf);
+        const cacheKey = `odo:v3:${imageHash}`;
+        const cached = ocrCache.get(cacheKey);
+        if (cached) {
+          const processingTime = Date.now() - startTime;
+          metrics.cacheHits++;
+          console.log('Returning cached odometer result');
+          return res.json({ ...(cached as any), fromCache: true, processingTime });
+        }
+
+        // --- Preprocess with odometer-specific enhancements ---
+        const processed = await preprocessImageForOdometer(buf); 
+        const client = getTextractClient();
+        if (!client) throw new Error("Textract client not available");
+
+        const tex = await client.send(new DetectDocumentTextCommand({ Document: { Bytes: processed } }));
+        const blocks = tex.Blocks || [];
+        const processingTime = Date.now() - startTime;
+
+        // Extract text with confidence scores
+        const lines = blocks
+          .filter(b => b.BlockType === "LINE" && b.Text && b.Confidence)
+          .map(b => ({
+            text: b.Text as string,
+            confidence: b.Confidence as number,
+            bbox: b.Geometry
+          }));
+
+        const words = blocks
+          .filter(b => b.BlockType === "WORD" && b.Text && b.Confidence)
+          .map(b => ({
+            text: b.Text as string,
+            confidence: b.Confidence as number,
+            bbox: b.Geometry
+          }));
+
+        const allText = lines.map(l => l.text).join('\n').trim();
+        const lineCount = lines.length;
+
+        console.log(`Extracted ${lineCount} lines from odometer image`);
+        console.log('Text sample:', allText.substring(0, 100));
+
+        // --- Find odometer candidates using specialized functions ---
+        const candidates: Array<{
+          value: number;
+          raw: string;
+          score: number;
+          confidence: number;
+          source: string;
+        }> = [];
+
+        // Method 1: Pattern-based extraction from text
+        const textCandidates = findOdometerCandidates(allText, words);
+        candidates.push(...textCandidates);
+
+        // Method 2: High-confidence line analysis
+        for (const line of lines.filter(l => l.confidence > 70)) {
+          if (looksLikeSpeedometer(line.text)) continue;
+          
+          const lineCandidates = extractOdometerFromLine(line.text, line.confidence, line.bbox);
+          candidates.push(...lineCandidates);
+        }
+
+        // Method 3: Word grouping for separated digits (e.g., "1 4 7 8 9 5")
+        const groupedCandidates = groupConsecutiveDigits(words);
+        candidates.push(...groupedCandidates);
+
+        // Remove duplicates and sort by score
+        const uniqueCandidates = removeDuplicateReadings(candidates);
+        const sortedCandidates = uniqueCandidates.sort((a, b) => b.score - a.score);
+
+        // Select the best candidate
+        const bestCandidate = sortedCandidates.length > 0 ? sortedCandidates[0] : null;
+
+        console.log(`Found ${sortedCandidates.length} odometer candidates`);
+        if (bestCandidate) {
+          console.log(`Best candidate: ${bestCandidate.value} km (score: ${bestCandidate.score.toFixed(1)})`);
+        }
+
+        // --- Update metrics ---
+        metrics.successfulRequests++;
+        if (!(metrics as any).odoDetectionRate) (metrics as any).odoDetectionRate = 0;
+        (metrics as any).odoDetectionRate =
+          ((metrics as any).odoDetectionRate * (metrics.successfulRequests - 1) + (bestCandidate ? 1 : 0)) /
+          metrics.successfulRequests;
+        metrics.averageProcessingTime =
+          (metrics.averageProcessingTime * (metrics.successfulRequests - 1) + processingTime) /
+          metrics.successfulRequests;
+
+        // --- Build response ---
+        const response = {
+          ok: true,
+          km: bestCandidate ? bestCandidate.value : null,
+          unit: "km" as const,
+          candidates: sortedCandidates
+            .slice(0, 5)
+            .map(c => ({ 
+              value: c.value, 
+              raw: c.raw,
+              score: Math.round(c.score * 10) / 10,
+              source: c.source 
+            })),
+          confidence: bestCandidate 
+            ? Math.round(Math.min(100, (bestCandidate.confidence * 0.7) + (bestCandidate.score * 0.3))) / 100
+            : 0,
+          processingTime,
+          textExtracted: allText.length > 0,
+          totalBlocks: blocks.length,
+          lineCount,
+          fromCache: false,
+          debugInfo: process.env.NODE_ENV === 'development' ? {
+            allText: allText.substring(0, 200),
+            topCandidates: sortedCandidates.slice(0, 3)
+          } : undefined
+        };
+
+        // --- Cache successful results ---
+        if (bestCandidate || sortedCandidates.length > 0) {
+          ocrCache.set(cacheKey, response);
+        }
+
+        return res.json(response);
+
+      } catch (error: any) {
+        const processingTime = Date.now() - startTime;
+        console.error("[/ocr/odometer] Textract error:", {
+          error: error.message,
+          code: error.code,
+          requestId: error.$metadata?.requestId,
+          processingTime,
+        });
+
+        // Handle specific AWS errors
+        if (error.name === "InvalidParameterException") {
+          return res.status(400).json({ 
+            error: "invalid_image", 
+            message: "Image format not supported or corrupted", 
+            processingTime,
+            suggestions: [
+              "Ensure image is in JPEG, PNG, TIFF, or WebP format",
+              "Check that the image file is not corrupted"
+            ]
+          });
+        }
+        
+        if (error.name === "ProvisionedThroughputExceededException") {
+          return res.status(429).json({ 
+            error: "rate_limit_exceeded", 
+            message: "Too many OCR requests. Please try again in a moment.", 
+            processingTime 
+          });
+        }
+        
+        if (error.code === "UnauthorizedOperation" || error.code === "AccessDenied") {
+          return res.status(500).json({ 
+            error: "aws_auth_error", 
+            message: "AWS credentials configuration error", 
+            processingTime 
+          });
+        }
+
+        // Generic OCR failure with odometer-specific guidance
+        return res.status(500).json({
+          error: "odometer_ocr_failed",
+          message: "Failed to read odometer from image",
+          processingTime,
+          suggestions: [
+            "Take photo straight-on to minimize reflections",
+            "Ensure odometer display is fully illuminated",
+            "Get closer so numbers fill most of the frame",
+            "Avoid glare from dashboard glass",
+            "Try manual entry if OCR continues to fail"
+          ],
+          details: process.env.NODE_ENV === "development" ? error.message : undefined,
+        });
       }
-
-      // Finally: choose the most plausible number
-      const best = pickBest(candidates);
-      const processingTime = Date.now() - startTime;
-
-      // metrics (mirror your pattern)
-      metrics.successfulRequests++;
-      if ((metrics as any).odoDetectionRate == null) (metrics as any).odoDetectionRate = 0;
-      (metrics as any).odoDetectionRate =
-        ((metrics as any).odoDetectionRate * (metrics.successfulRequests - 1) + (best ? 1 : 0)) /
-        metrics.successfulRequests;
-      metrics.averageProcessingTime =
-        (metrics.averageProcessingTime * (metrics.successfulRequests - 1) + processingTime) /
-        metrics.successfulRequests;
-
-      const payload = {
-        ok: true,
-        km: best ? best.value : null,     // SA app → km only
-        unit: "km" as const,
-        candidates: candidates
-          .sort((a, b) => b.score - a.score)
-          .slice(0, 6)
-          .map((c) => ({ value: c.value, score: Math.round(c.score * 10) / 10 })),
-        confidence: best ? Math.round(Math.min(1, (best.conf / 100) * (best.score / 18)) * 100) / 100 : 0, // 0..1
-        processingTime,
-        textExtracted: allText.length > 0,
-        totalBlocks: blocks.length,
-        lineCount,
-        fromCache: false,
-      };
-
-      ocrCache.set(cacheKey, payload);
-      return res.json(payload);
-    } catch (error: any) {
-      const processingTime = Date.now() - startTime;
-      console.error("[/ocr/odometer v2] Textract error:", {
-        error: error.message,
-        code: error.code,
-        requestId: error.$metadata?.requestId,
-        processingTime,
-      });
-
-      if (error.name === "InvalidParameterException") {
-        return res.status(400).json({ error: "invalid_image", message: "Unsupported/corrupted image", processingTime });
-      }
-      if (error.name === "ProvisionedThroughputExceededException") {
-        return res.status(429).json({ error: "rate_limit_exceeded", message: "Too many requests", processingTime });
-      }
-      if (error.code === "UnauthorizedOperation" || error.code === "AccessDenied") {
-        return res.status(500).json({ error: "aws_auth_error", message: "AWS credentials error", processingTime });
-      }
-      return res.status(500).json({
-        error: "textract_failed",
-        message: "OCR processing failed",
-        processingTime,
-        details: process.env.NODE_ENV === "development" ? error.message : undefined,
-      });
-    }
-  });
+    });
 
 
   // Intake seed: set required photos for a VIN/lot

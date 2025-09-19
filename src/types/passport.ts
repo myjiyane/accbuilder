@@ -38,12 +38,12 @@ export interface ImagesManifest {
 
 
 export interface PassportBase {
-  vin: string;        // 17-char VIN
+  vin: string;        
   lot_id: string;
   dekra?: {
     url?: string;
     report_id?: string;
-    inspection_ts?: string; // ISO8601
+    inspection_ts?: string;
     site?: string;
   };
   odometer?: {
