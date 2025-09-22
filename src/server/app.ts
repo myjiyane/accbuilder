@@ -297,7 +297,10 @@ function normalizeVin(raw: string) {
 }
 
 function isValidVin(vin: string): boolean {
-  if (vin.length !== 17) return false;
+  if (!vin || vin.length !== 17) return false;
+  
+  // Character set validation - VINs exclude I, O, Q to avoid confusion
+  if (!/^[A-HJ-NPR-Z0-9]{17}$/i.test(vin)) return false;
   
   // VIN check digit validation (position 9)
   const weights = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2];
@@ -308,15 +311,17 @@ function isValidVin(vin: string): boolean {
     'T': 3, 'U': 4, 'V': 5, 'W': 6, 'X': 7, 'Y': 8, 'Z': 9
   };
   
+  const upper = vin.toUpperCase();
   let sum = 0;
+  
   for (let i = 0; i < 17; i++) {
-    if (i === 8) continue; // skip check digit position
-    sum += (values[vin[i]] || 0) * weights[i];
+    if (i === 8) continue;
+    sum += (values[upper[i]] || 0) * weights[i];
   }
   
   const checkDigit = sum % 11;
   const expectedCheck = checkDigit === 10 ? 'X' : checkDigit.toString();
-  return vin[8] === expectedCheck;
+  return upper[8] === expectedCheck;
 }
 
 function findOdometerCandidates(text: string, words: any[]): OdoCand[] {
@@ -633,23 +638,30 @@ function findVinFromLicenceDisc(text: string, lines: any[], words: any[]): Array
   const candidates = [];
   const allText = text.toUpperCase();
   
-  // Enhanced SA licence disc VIN indicators with better capture groups
+  // Method 1: Enhanced keyword matching that excludes VIN/VN prefix
   const vinKeywords = [
-    /(?:CHASSIS\s*NO?[:.]?\s*)([A-HJ-NPR-Z0-9]{17})(?![A-HJ-NPR-Z0-9])/i,
-    /(?:VIN[:.]?\s*)([A-HJ-NPR-Z0-9]{17})(?![A-HJ-NPR-Z0-9])/i,
-    /(?:VEHICLE\s*ID[:.]?\s*)([A-HJ-NPR-Z0-9]{17})(?![A-HJ-NPR-Z0-9])/i,
+    /(?:CHASSIS\s*NO?[:.]?\s*)([A-HJ-NPR-Z0-9]{17})\b/gi,
+    /(?:VIN[:.]?\s*)([A-HJ-NPR-Z0-9]{17})\b/gi,
+    /(?:VN[:.]?\s*)([A-HJ-NPR-Z0-9]{17})\b/gi, // Handle OCR error where "VIN" becomes "VN"
+    /(?:VEHICLE\s*ID[:.]?\s*)([A-HJ-NPR-Z0-9]{17})\b/gi,
   ];
 
-  // Method 1: Enhanced keyword matching with exact 17-character extraction
   for (const pattern of vinKeywords) {
-    const match = allText.match(pattern);
-    if (match && match[1] && match[1].length === 17) {
-      const vin = match[1];
-      if (isValidVin(vin)) {
+    let match;
+    while ((match = pattern.exec(allText)) !== null) {
+      const extractedVin = match[1]; // Only the 17-character VIN
+      
+      // Verify it's exactly 17 characters and doesn't include any prefix contamination
+      if (extractedVin.length === 17 && 
+          !extractedVin.startsWith('VIN') && 
+          !extractedVin.startsWith('VN') &&
+          !extractedVin.startsWith('CHASSIS') &&
+          isValidVin(extractedVin)) {
+        
         candidates.push({
-          vin,
+          vin: extractedVin,
           raw: match[0],
-          score: 25,
+          score: 25, 
           confidence: 95,
           position: 'keyword_match'
         });
@@ -657,15 +669,22 @@ function findVinFromLicenceDisc(text: string, lines: any[], words: any[]): Array
     }
   }
 
-  // Method 2: Clean 17-character pattern extraction
-  // This handles cases like "VIN 252DDFDFEF5452125" more precisely
+  // Method 2: Positional analysis for SA licence discs
+  const vinPositionCandidates = findVinByPosition(lines, words);
+  candidates.push(...vinPositionCandidates);
+
+  // Method 3: Clean 17-character pattern extraction (fallback)
   const cleanVinPattern = /\b([A-HJ-NPR-Z0-9]{17})\b/g;
   let match;
   while ((match = cleanVinPattern.exec(allText)) !== null) {
     const vin = match[1];
     
-    // Ensure it's exactly 17 characters and valid
-    if (vin.length === 17 && isValidVin(vin)) {
+    // Ensure it's exactly 17 characters, valid, and not contaminated
+    if (vin.length === 17 && 
+        !vin.startsWith('VIN') && 
+        !vin.startsWith('VN') &&
+        isValidVin(vin)) {
+      
       // Check if already found by keyword method
       const alreadyFound = candidates.some(c => c.vin === vin);
       if (!alreadyFound) {
@@ -680,35 +699,67 @@ function findVinFromLicenceDisc(text: string, lines: any[], words: any[]): Array
     }
   }
 
-  // Method 3: Line-by-line extraction with space removal for curved text
+  // Method 4: Line-by-line extraction with space removal for curved text
   for (const line of lines) {
     const lineText = line.text.replace(/\s/g, ''); // Remove all spaces
     
-    // Look for exactly 17 consecutive valid VIN characters
-    const vinInLine = lineText.match(/([A-HJ-NPR-Z0-9]{17})/g);
-    if (vinInLine) {
-      for (const vin of vinInLine) {
-        if (vin.length === 17 && isValidVin(vin)) {
-          const alreadyFound = candidates.some(c => c.vin === vin);
-          if (!alreadyFound) {
-            candidates.push({
-              vin,
-              raw: line.text,
-              score: 18,
-              confidence: line.confidence || 80,
-              position: 'line_extraction'
-            });
+    // Skip lines that contain VIN keywords to avoid double-processing
+    if (/VIN\s*ID/i.test(line.text)) {
+      const vinAfterKeyword = lineText.match(/(?:VIN)([A-HJ-NPR-Z0-9]{17})/i);
+      if (vinAfterKeyword && vinAfterKeyword[1].length === 17 && isValidVin(vinAfterKeyword[1])) {
+        const vin = vinAfterKeyword[1];
+        const alreadyFound = candidates.some(c => c.vin === vin);
+        if (!alreadyFound) {
+          candidates.push({
+            vin,
+            raw: line.text,
+            score: 22, // High score for keyword lines
+            confidence: line.confidence || 80,
+            position: 'keyword_line_extraction'
+          });
+        }
+      }
+    } else {
+      // For non-keyword lines, look for standalone 17-character VINs
+      const vinInLine = lineText.match(/([A-HJ-NPR-Z0-9]{17})/g);
+      if (vinInLine) {
+        for (const vin of vinInLine) {
+          if (vin.length === 17 && isValidVin(vin)) {
+            const alreadyFound = candidates.some(c => c.vin === vin);
+            if (!alreadyFound) {
+              // Calculate position score
+              const bbox = line.bbox?.BoundingBox;
+              const centerY = bbox ? bbox.Top + (bbox.Height / 2) : 0.6;
+              const centerX = bbox ? bbox.Left + (bbox.Width / 2) : 0.5;
+              const positionScore = calculateLicenceDiscPositionScore(centerX, centerY);
+              
+              candidates.push({
+                vin,
+                raw: line.text,
+                score: 18 + positionScore,
+                confidence: line.confidence || 80,
+                position: `line_${centerX.toFixed(2)}_${centerY.toFixed(2)}`
+              });
+            }
           }
         }
       }
     }
   }
 
-  // Method 4: Handle broken VINs with exact 17-character validation
+  // Method 5: Handle broken VINs with exact 17-character validation
   const reconstructedVins = reconstructBrokenVinExact(lines);
   candidates.push(...reconstructedVins);
 
-  return candidates.sort((a, b) => b.score - a.score);
+  // Remove any remaining contaminated VINs and sort by score
+  const cleanCandidates = candidates.filter(c => 
+    c.vin.length === 17 && 
+    !c.vin.startsWith('VIN') && 
+    !c.vin.startsWith('VN') &&
+    isValidVin(c.vin)
+  );
+
+  return cleanCandidates.sort((a, b) => b.score - a.score);
 }
 
 
@@ -724,7 +775,7 @@ function findVinByPosition(lines: any[], words: any[]): Array<{
   // SA licence disc layout: VIN usually in middle-to-lower area
   // Filter lines by vertical position (0.4 to 0.8 of image height)
   const middleLowerLines = lines.filter(line => {
-    if (!line.bbox?.BoundingBox) return true; // Include if no position data
+    if (!line.bbox?.BoundingBox) return true; 
     const y = line.bbox.BoundingBox.Top + (line.bbox.BoundingBox.Height / 2);
     return y >= 0.4 && y <= 0.8;
   });
@@ -1002,12 +1053,23 @@ function attachRoutes(r: express.Router) {
 
       // Extract text with confidence scores
       const blocks = textractResult.Blocks || [];
+      
       const lines = blocks
         .filter(b => b.BlockType === "LINE" && b.Text && b.Confidence)
         .map(b => ({
           text: b.Text as string,
           confidence: b.Confidence as number,
+          bbox: b.Geometry
         }));
+
+      
+      const words = blocks
+        .filter(b => b.BlockType === "WORD" && b.Text && b.Confidence)
+        .map(b => ({
+          text: b.Text as string,
+          confidence: b.Confidence as number,
+          bbox: b.Geometry // Add this for position analysis
+        }));  
 
       // Filter high-confidence results for VIN detection
       const highConfidenceLines = lines
@@ -1016,14 +1078,42 @@ function attachRoutes(r: express.Router) {
 
       const allText = lines.map(l => l.text).join("\n");
       const highConfidenceText = highConfidenceLines.join("\n");
-      
-      // Try VIN detection on high-confidence text first, fallback to all text
-      let candidates = findVinCandidates(highConfidenceText);
-      if (candidates.length === 0) {
-        candidates = findVinCandidates(allText);
+
+      // Method 1: Try licence disc-specific extraction first
+      let bestVin = null;
+      let extractionMethod = 'none';
+      let candidates = [];
+
+      try {
+        const licenceDiscCandidates = findVinFromLicenceDisc(allText, lines, words);
+        if (licenceDiscCandidates.length > 0) {
+          bestVin = licenceDiscCandidates[0].vin;
+          extractionMethod = 'licence_disc';
+          candidates = licenceDiscCandidates.slice(0, 5).map(c => c.vin); 
+          console.log(`VIN found via licence disc extraction: ${bestVin}`);
+        }
+      } catch (error) {
+        console.warn('Licence disc extraction failed:', error);
       }
 
-      const bestVin = findBestVinCandidate(candidates);
+      // Method 2: Fallback to generic VIN extraction if licence disc method fails
+      if (!bestVin) {
+        try {
+          let genericCandidates = findVinCandidates(highConfidenceText);
+          if (genericCandidates.length === 0) {
+            genericCandidates = findVinCandidates(allText);
+          }
+          bestVin = findBestVinCandidate(genericCandidates);
+          if (bestVin) {
+            extractionMethod = 'generic_fallback';
+            candidates = genericCandidates.slice(0, 5);
+            console.log(`VIN found via generic extraction: ${bestVin}`);
+          }
+        } catch (error) {
+          console.warn('Generic VIN extraction failed:', error);
+        }
+      }
+
       const avgConfidence = lines.length > 0 
         ? lines.reduce((sum, l) => sum + l.confidence, 0) / lines.length 
         : 0;
