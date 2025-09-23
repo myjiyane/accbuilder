@@ -19,6 +19,7 @@ import type { PassportDraft, PassportSealed, ImageRole } from "../types/passport
 import { validateDraft, validateSealed } from "../schema/index.js";
 import { mapToPassportDraft } from "../ingest/dekra/mapper.js";
 import { preprocessImageForOdometer } from "./odometer/preprocess.js";
+import { preprocessImageForLicenceDisc } from "./vin/preprocess.js";
 
 // ---------- Configuration & Environment ----------
 const DATA_DIR = process.env.DATA_DIR || "data";
@@ -472,42 +473,6 @@ function findBestVinCandidate(candidates: string[]): string | null {
 }
 
 
-async function preprocessImageForLicenceDisc(buffer: Buffer): Promise<Buffer> {
-  try {
-    return await sharp(buffer)
-      // Higher resolution for tiny licence disc text
-      .resize(2800, 2100, { 
-        fit: 'inside', 
-        withoutEnlargement: true 
-      })
-      // Multi-step glare reduction for windshield reflections
-      .modulate({ brightness: 0.85, saturation: 1.3, hue: 0 })
-      // Gaussian blur then sharpen to reduce noise while preserving text
-      .blur(0.3)
-      .sharpen({ sigma: 2.0, m1: 1.5, m2: 0.4, x1: 4, y2: 20, y3: 30 })
-      // Stronger contrast for small text
-      .normalize({ lower: 1, upper: 99 })
-      // Adaptive gamma for reflective surfaces
-      .gamma(1.35)
-      // Convert to grayscale to eliminate color distractions
-      .grayscale()
-      // Morphological operations to clean up character edges
-      .threshold(128) // Binarize
-      .negate() // Invert for better character definition
-      .dilate() // Slightly thicken characters
-      .erode() // Then thin them back to original width
-      .negate() // Invert back
-      // Final enhancement
-      .normalize()
-      .sharpen({ sigma: 1.0, m1: 2.0 })
-      .jpeg({ quality: 99, progressive: true })
-      .toBuffer();
-  } catch (error) {
-    logger.warn('Enhanced licence disc preprocessing failed, using original', { error: serializeError(error) });
-    return buffer;
-  }
-}
-
 
 function findVinFromLicenceDisc(text: string, lines: any[], words: any[]): Array<{
   vin: string;
@@ -870,163 +835,298 @@ function attachRoutes(r: express.Router) {
     try {
       // Input validation
       const buf = req.file?.buffer;
+
       if (!buf || !buf.length) {
-        return res.status(400).json({ 
-          error: "no_file", 
-          message: "No image file provided" 
+
+        return res.status(400).json({
+
+          error: "no_file",
+
+          message: "No image file provided",
+
         });
+
       }
 
-      // AWS configuration check
+
+
       if (!hasAwsConfig) {
-        return res.status(503).json({ 
-          error: "aws_not_configured", 
-          message: "AWS Textract is not properly configured" 
+
+        return res.status(503).json({
+
+          error: "aws_not_configured",
+
+          message: "AWS Textract is not properly configured",
+
         });
+
       }
 
-      // File size validation
+
+
       if (buf.length > TEXTRACT_MAX_FILE_SIZE) {
-        return res.status(400).json({ 
-          error: "file_too_large", 
-          message: `File size exceeds ${TEXTRACT_MAX_FILE_SIZE / 1024 / 1024}MB limit` 
+
+        return res.status(400).json({
+
+          error: "file_too_large",
+
+          message: `File size exceeds ${TEXTRACT_MAX_FILE_SIZE / 1024 / 1024}MB limit`,
+
         });
+
       }
 
-      // File type validation
+
+
       const fileType = req.file?.mimetype;
-      
+
       const allowedTypes = ['image/jpeg', 'image/png', 'image/tiff', 'image/webp'];
+
       if (!fileType || !allowedTypes.includes(fileType)) {
-        return res.status(400).json({ 
-          error: "invalid_file_type", 
-          message: "Only JPEG, PNG, TIFF, and WebP images are supported" 
+
+        return res.status(400).json({
+
+          error: "invalid_file_type",
+
+          message: "Only JPEG, PNG, TIFF, and WebP images are supported",
+
         });
+
       }
+
+
 
       logger.info('Processing VIN OCR request', { requestId, fileType, sizeBytes: buf.length });
 
-      // Check cache first
-      const imageHash = getImageHash(buf);
-      const cached = ocrCache.get(imageHash);
 
-      if (cached) {
+
+      const rawHash = getImageHash(buf);
+
+      const rawCacheKey = `vin:v3:raw:${rawHash}`;
+
+      const cachedRaw = ocrCache.get(rawCacheKey);
+
+      if (cachedRaw) {
+
         metrics.cacheHits++;
-        logger.info('VIN OCR cache hit', { requestId, cacheKey: imageHash });
-        return res.json({ 
-          ...(cached as any), 
-          fromCache: true,
-          processingTime: Date.now() - startTime
-        });
+
+        logger.info('VIN OCR cache hit', { requestId, cacheKey: rawCacheKey, stage: 'raw' });
+
+        return res.json({ ...(cachedRaw as any), fromCache: true, processingTime: Date.now() - startTime });
+
       }
-     
-      // Preprocess image for VIN displays
-      const processedBuffer = await preprocessImageForLicenceDisc(buf)
-      
+
+
+
+      const preprocessStart = Date.now();
+
+      const processedBuffer = await preprocessImageForLicenceDisc(buf);
+
+      const preprocessMs = Date.now() - preprocessStart;
+
+
+
+      const processedHash = getImageHash(processedBuffer);
+
+      const processedCacheKey = `vin:v3:proc:${processedHash}`;
+
+      const cachedProcessed = ocrCache.get(processedCacheKey);
+
+      if (cachedProcessed) {
+
+        metrics.cacheHits++;
+
+        logger.info('VIN OCR cache hit', { requestId, cacheKey: processedCacheKey, stage: 'processed' });
+
+        return res.json({ ...(cachedProcessed as any), fromCache: true, processingTime: Date.now() - startTime });
+
+      }
+
+
+
       const client = getTextractClient();
-      if (!client) {
-        throw new Error('Textract client not available');
-      }
 
-      const command = new DetectDocumentTextCommand({ 
-        Document: { Bytes: processedBuffer } 
-      });
-      
-      const textractResult = await client.send(command);
-      const processingTime = Date.now() - startTime;
+      if (!client) throw new Error('Textract client not available');
 
-      // Extract text with confidence scores
+
+
+      const textractStart = Date.now();
+
+      const textractResult = await client.send(new DetectDocumentTextCommand({ Document: { Bytes: processedBuffer } }));
+
+      const textractMs = Date.now() - textractStart;
+
+
+
       const blocks = textractResult.Blocks || [];
-      
+
       const lines = blocks
-        .filter(b => b.BlockType === "LINE" && b.Text && b.Confidence)
-        .map(b => ({
-          text: b.Text as string,
-          confidence: b.Confidence as number,
-          bbox: b.Geometry
-        }));
 
-      
+        .filter((b) => b.BlockType === "LINE" && b.Text && b.Confidence)
+
+        .map((b) => ({ text: b.Text as string, confidence: b.Confidence as number, bbox: b.Geometry }));
+
       const words = blocks
-        .filter(b => b.BlockType === "WORD" && b.Text && b.Confidence)
-        .map(b => ({
-          text: b.Text as string,
-          confidence: b.Confidence as number,
-          bbox: b.Geometry // Add this for position analysis
-        }));  
 
-      // Filter high-confidence results for VIN detection
-      const highConfidenceLines = lines
-        .filter(l => l.confidence > 80)
-        .map(l => l.text);
+        .filter((b) => b.BlockType === "WORD" && b.Text && b.Confidence)
 
-      const allText = lines.map(l => l.text).join("\n");
-      const highConfidenceText = highConfidenceLines.join("\n");
+        .map((b) => ({ text: b.Text as string, confidence: b.Confidence as number, bbox: b.Geometry }));
 
-      // Method 1: Try licence disc-specific extraction first
-      let bestVin = null;
-      let extractionMethod = 'none';
+
+
+      const highConfidenceLines = lines.filter((l) => l.confidence > 80).map((l) => l.text);
+
+      const allText = lines.map((l) => l.text).join('\n');
+
+      const highConfidenceText = highConfidenceLines.join('\n');
+
+
+
+      const heuristicsStart = Date.now();
+
+      let bestVin: string | null = null;
+
+      let extractionMethod: 'none' | 'licence_disc' | 'generic_fallback' = 'none';
+
       let candidates: string[] = [];
 
+
+
       try {
+
         const licenceDiscCandidates = findVinFromLicenceDisc(allText, lines, words);
+
         if (licenceDiscCandidates.length > 0) {
+
           bestVin = licenceDiscCandidates[0].vin;
+
           extractionMethod = 'licence_disc';
-          candidates = licenceDiscCandidates.slice(0, 5).map(c => c.vin); 
+
+          candidates = licenceDiscCandidates.slice(0, 5).map((c) => c.vin);
+
           logger.debug('VIN found via licence disc extraction', { requestId, vin: bestVin });
+
         }
+
       } catch (error) {
+
         logger.warn('Licence disc extraction failed', { requestId, error: serializeError(error) });
+
       }
 
-      // Method 2: Fallback to generic VIN extraction if licence disc method fails
+
+
+      let fallbackRan = false;
+
       if (!bestVin) {
+
+        fallbackRan = true;
+
         try {
+
           let genericCandidates = findVinCandidates(highConfidenceText);
-          if (genericCandidates.length === 0) {
-            genericCandidates = findVinCandidates(allText);
-          }
+
+          if (genericCandidates.length === 0) genericCandidates = findVinCandidates(allText);
+
           bestVin = findBestVinCandidate(genericCandidates);
+
           if (bestVin) {
+
             extractionMethod = 'generic_fallback';
+
             candidates = genericCandidates.slice(0, 5);
+
             logger.debug('VIN found via generic extraction', { requestId, vin: bestVin });
+
           }
+
         } catch (error) {
+
           logger.warn('Generic VIN extraction failed', { requestId, error: serializeError(error) });
+
         }
+
       }
 
-      const avgConfidence = lines.length > 0 
-        ? lines.reduce((sum, l) => sum + l.confidence, 0) / lines.length 
-        : 0;
 
-      // Update metrics
+
+      const heuristicsMs = Date.now() - heuristicsStart;
+
+      const avgConfidence =
+
+        lines.length > 0
+
+          ? lines.reduce((sum, l) => sum + l.confidence, 0) / lines.length
+
+          : 0;
+
+
+
       metrics.successfulRequests++;
-      if (bestVin) {
-        metrics.vinDetectionRate = (metrics.vinDetectionRate * (metrics.successfulRequests - 1) + 1) / metrics.successfulRequests;
-      } else {
-        metrics.vinDetectionRate = (metrics.vinDetectionRate * (metrics.successfulRequests - 1)) / metrics.successfulRequests;
-      }
-      metrics.averageProcessingTime = (metrics.averageProcessingTime * (metrics.successfulRequests - 1) + processingTime) / metrics.successfulRequests;
 
-      // Create result object
-      const result = { 
-        ok: true, 
+      if (bestVin) {
+
+        metrics.vinDetectionRate =
+
+          (metrics.vinDetectionRate * (metrics.successfulRequests - 1) + 1) / metrics.successfulRequests;
+
+      } else {
+
+        metrics.vinDetectionRate =
+
+          (metrics.vinDetectionRate * (metrics.successfulRequests - 1)) / metrics.successfulRequests;
+
+      }
+
+
+
+      const processingTime = Date.now() - startTime;
+
+      metrics.averageProcessingTime =
+
+        (metrics.averageProcessingTime * (metrics.successfulRequests - 1) + processingTime) /
+
+        metrics.successfulRequests;
+
+
+
+      const result = {
+
+        ok: true,
+
         vin: bestVin,
+
         vinValid: bestVin ? isValidVin(bestVin) : false,
+
         candidates: candidates.slice(0, 5),
+
         confidence: Math.round(avgConfidence * 100) / 100,
+
         processingTime,
+
         textExtracted: allText.length > 0,
+
         totalBlocks: blocks.length,
+
         lineCount: lines.length,
-        fromCache: false
+
+        fromCache: false,
+
+        extractionMethod,
+
+        timings: { preprocessMs, textractMs, heuristicsMs },
+
       };
 
-      // Cache the result
-      ocrCache.set(imageHash, result);
+
+
+      logger.debug('VIN OCR timings', { requestId, preprocessMs, textractMs, heuristicsMs, totalMs: processingTime, fallbackRan });
+
+      ocrCache.set(rawCacheKey, result);
+
+      ocrCache.set(processedCacheKey, result);
+
+
 
       res.json(result);
 
@@ -1729,6 +1829,10 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 export default app;
+
+
+
+
 
 
 
