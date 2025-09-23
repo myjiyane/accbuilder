@@ -9,6 +9,8 @@ import crypto from "node:crypto";
 import NodeCache from "node-cache";
 import sharp from "sharp";
 import { makePhotosRouter } from "./photos.js";
+import { logger, requestLogger, serializeError, getRequestId } from "./logger.js";
+import type { Block } from "@aws-sdk/client-textract";
 import { TextractClient, DetectDocumentTextCommand } from "@aws-sdk/client-textract";
 import { fromEnv } from "@aws-sdk/credential-providers";
 
@@ -29,35 +31,29 @@ const TEXTRACT_MAX_FILE_SIZE = Number(process.env.TEXTRACT_MAX_FILE_SIZE);
 const TEXTRACT_CACHE_TTL = Number(process.env.TEXTRACT_CACHE_TTL);
 
 
-type OdoCand = {
+type OdometerCandidateSource = 'text_pattern' | 'line_extraction' | 'digit_grouping';
+type OdometerCandidate = {
   value: number;
   raw: string;
   score: number;
-  conf: number;
+  source: OdometerCandidateSource;
+  confidence?: number;
   bbox?: Block["Geometry"];
 };
 
-type OdoCand = {
-  value: number;
-  raw: string;
-  unit: "km" | "mi" | null;
-  score: number;
-  near: string[];
-  lineConf?: number;
-};
 
 
 // ---------- AWS Configuration ----------
 function validateAwsConfig(): boolean {
   const required = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'];
   const missing = required.filter(key => !process.env[key]);
-  
+
   if (missing.length > 0) {
-    console.warn(`Missing AWS configuration: ${missing.join(', ')}`);
-    console.warn('Textract OCR functionality will not work without proper AWS credentials');
+    logger.warn('Missing AWS configuration', { missing });
+    logger.warn('Textract OCR functionality disabled without AWS credentials');
     return false;
   }
-  
+
   return true;
 }
 
@@ -235,8 +231,8 @@ function isValidVin(vin: string): boolean {
   return upper[8] === expectedCheck;
 }
 
-function findOdometerCandidates(text: string, words: any[]): OdoCand[] {
-  const candidates: OdoCand[] = [];
+function findOdometerCandidates(text: string): OdometerCandidate[] {
+  const candidates: OdometerCandidate[] = [];
   
   // Common odometer indicators
   const odometerKeywords = /\b(km|miles|mi|odometer|odo|total|mileage)\b/i;
@@ -365,7 +361,7 @@ function groupConsecutiveDigits(words: Array<{text: string; confidence: number; 
         candidates.push({
           value,
           raw: sequence.map(s => s.text).join(' '),
-          score: calculateOdometerScore(value, combined, false, avgConfidence) + 2, // Bonus for grouped digits
+          score: calculateOdometerScore(value, combined, false) + 2, // Bonus for grouped digits
           confidence: avgConfidence,
           source: 'digit_grouping'
         });
@@ -497,7 +493,7 @@ async function preprocessImageForOdometer(buffer: Buffer): Promise<Buffer> {
       .jpeg({ quality: 95, progressive: true })
       .toBuffer();
   } catch (error) {
-    console.warn('Odometer preprocessing failed, using original:', error);
+    logger.warn('Odometer preprocessing failed, using original', { error: serializeError(error) });
     return buffer;
   }
 }
@@ -533,7 +529,7 @@ async function preprocessImageForLicenceDisc(buffer: Buffer): Promise<Buffer> {
       .jpeg({ quality: 99, progressive: true })
       .toBuffer();
   } catch (error) {
-    console.warn('Enhanced licence disc preprocessing failed, using original:', error);
+    logger.warn('Enhanced licence disc preprocessing failed, using original', { error: serializeError(error) });
     return buffer;
   }
 }
@@ -785,7 +781,7 @@ async function preprocessImageForOcr(buffer: Buffer): Promise<Buffer> {
       .jpeg({ quality: 95 })
       .toBuffer();
   } catch (error) {
-    console.warn('Image preprocessing failed, using original:', error);
+    logger.warn('Image preprocessing failed, using original', { error: serializeError(error) });
     return buffer;
   }
 }
@@ -793,6 +789,8 @@ async function preprocessImageForOcr(buffer: Buffer): Promise<Buffer> {
 // ---------- App Setup ----------
 const app = express();
 const storage = await createDevStorage(DATA_DIR);
+
+app.use(requestLogger);
 
 const photosRouter = makePhotosRouter(storage);
 app.use(`${API_PREFIX}/intake/photos`, photosRouter);
@@ -892,6 +890,7 @@ function attachRoutes(r: express.Router) {
   
   r.post("/ocr/vin", upload.single("file"), async (req, res) => {
     const startTime = Date.now();
+    const requestId = getRequestId(res);
     metrics.totalRequests++;
     
     try {
@@ -931,7 +930,7 @@ function attachRoutes(r: express.Router) {
         });
       }
 
-      console.log(`Processing ${fileType} image, size: ${buf.length} bytes`);
+      logger.info('Processing VIN OCR request', { requestId, fileType, sizeBytes: buf.length });
 
       // Check cache first
       const imageHash = getImageHash(buf);
@@ -939,7 +938,7 @@ function attachRoutes(r: express.Router) {
 
       if (cached) {
         metrics.cacheHits++;
-        console.log('Returning cached OCR result');
+        logger.info('VIN OCR cache hit', { requestId, cacheKey: imageHash });
         return res.json({ 
           ...(cached as any), 
           fromCache: true,
@@ -1001,10 +1000,10 @@ function attachRoutes(r: express.Router) {
           bestVin = licenceDiscCandidates[0].vin;
           extractionMethod = 'licence_disc';
           candidates = licenceDiscCandidates.slice(0, 5).map(c => c.vin); 
-          console.log(`VIN found via licence disc extraction: ${bestVin}`);
+          logger.debug('VIN found via licence disc extraction', { requestId, vin: bestVin });
         }
       } catch (error) {
-        console.warn('Licence disc extraction failed:', error);
+        logger.warn('Licence disc extraction failed', { requestId, error: serializeError(error) });
       }
 
       // Method 2: Fallback to generic VIN extraction if licence disc method fails
@@ -1018,10 +1017,10 @@ function attachRoutes(r: express.Router) {
           if (bestVin) {
             extractionMethod = 'generic_fallback';
             candidates = genericCandidates.slice(0, 5);
-            console.log(`VIN found via generic extraction: ${bestVin}`);
+            logger.debug('VIN found via generic extraction', { requestId, vin: bestVin });
           }
         } catch (error) {
-          console.warn('Generic VIN extraction failed:', error);
+          logger.warn('Generic VIN extraction failed', { requestId, error: serializeError(error) });
         }
       }
 
@@ -1060,10 +1059,10 @@ function attachRoutes(r: express.Router) {
     } catch (error: any) {
       const processingTime = Date.now() - startTime;
       
-      console.error("Textract OCR error:", {
-        error: error.message,
-        code: error.code,
-        requestId: error.$metadata?.requestId,
+      logger.error('Textract OCR error', {
+        requestId,
+        awsRequestId: error.$metadata?.requestId,
+        error: serializeError(error),
         processingTime
       });
 
@@ -1124,6 +1123,7 @@ function attachRoutes(r: express.Router) {
 
   // ingest DEKRA PDF → Draft
   r.post("/ingest/dekra", upload.single("pdf"), async (req, res) => {
+    const requestId = getRequestId(res);
     try {
       const lotId = (req.body.lot_id as string) || "N/A";
       const dekraUrl = (req.body.dekra_url as string) || undefined;
@@ -1190,13 +1190,14 @@ function attachRoutes(r: express.Router) {
         record: rec,
       });
     } catch (e: any) {
-      console.error(e);
+      logger.error('DEKRA ingest failed', { requestId, error: serializeError(e) });
       res.status(500).json({ error: "ingest_failed", message: e?.message || String(e) });
     }
   });
 
   // seal a draft → sealed passport
   r.post("/passports/seal", async (req, res) => {
+    const requestId = getRequestId(res);
     try {
       const vin = sanitizeVin(req.body?.vin);
       if (!vin) return res.status(400).json({ error: "vin_required" });
@@ -1228,7 +1229,7 @@ function attachRoutes(r: express.Router) {
       const updated = await storage.upsertSealed(sealed);
       res.json({ ok: true, record: updated });
     } catch (e: any) {
-      console.error(e);
+      logger.error('Failed to seal passport', { requestId, error: serializeError(e) });
       res.status(500).json({ error: "seal_failed", message: e?.message || String(e) });
     }
   });
@@ -1265,6 +1266,7 @@ function attachRoutes(r: express.Router) {
 
 
   r.post("/intake/init", async (req, res) => {
+    const requestId = getRequestId(res);
     try {
       const vin = sanitizeVin(req.body?.vin);
       const evInfo = detectEVFromVin(vin);
@@ -1323,6 +1325,7 @@ function attachRoutes(r: express.Router) {
         } 
       });
     } catch (e: any) {
+      logger.error('Failed to initialise intake draft', { requestId, error: serializeError(e) });
       res.status(500).json({ error: "init_failed", message: e?.message || String(e) });
     }
   });
@@ -1331,6 +1334,7 @@ function attachRoutes(r: express.Router) {
   // ---------- Route ----------
   r.post("/ocr/odometer", upload.single("file"), async (req, res) => {
       const startTime = Date.now();
+      const requestId = getRequestId(res);
       metrics.totalRequests++;
 
       try {
@@ -1348,7 +1352,7 @@ function attachRoutes(r: express.Router) {
           return res.status(400).json({ error: "invalid_file_type", message: "Only JPEG, PNG, TIFF, WebP supported" });
         }
 
-        console.log(`Processing odometer image: ${req.file.mimetype}, size: ${buf.length} bytes`);
+        logger.info('Processing odometer OCR request', { requestId, mimetype: req.file?.mimetype, sizeBytes: buf.length });
 
         // --- Cache ---
         const imageHash = getImageHash(buf);
@@ -1357,7 +1361,7 @@ function attachRoutes(r: express.Router) {
         if (cached) {
           const processingTime = Date.now() - startTime;
           metrics.cacheHits++;
-          console.log('Returning cached odometer result');
+          logger.info('Odometer OCR cache hit', { requestId, cacheKey: imageHash });
           return res.json({ ...(cached as any), fromCache: true, processingTime });
         }
 
@@ -1390,8 +1394,8 @@ function attachRoutes(r: express.Router) {
         const allText = lines.map(l => l.text).join('\n').trim();
         const lineCount = lines.length;
 
-        console.log(`Extracted ${lineCount} lines from odometer image`);
-        console.log('Text sample:', allText.substring(0, 100));
+        logger.debug('Extracted odometer OCR lines', { requestId, lineCount });
+        logger.debug('Odometer OCR text sample', { requestId, sample: allText.substring(0, 100) });
 
         // --- Find odometer candidates using specialized functions ---
         const candidates: Array<{
@@ -1403,7 +1407,7 @@ function attachRoutes(r: express.Router) {
         }> = [];
 
         // Method 1: Pattern-based extraction from text
-        const textCandidates = findOdometerCandidates(allText, words);
+        const textCandidates = findOdometerCandidates(allText);
         candidates.push(...textCandidates);
 
         // Method 2: High-confidence line analysis
@@ -1425,9 +1429,9 @@ function attachRoutes(r: express.Router) {
         // Select the best candidate
         const bestCandidate = sortedCandidates.length > 0 ? sortedCandidates[0] : null;
 
-        console.log(`Found ${sortedCandidates.length} odometer candidates`);
+        logger.debug('Odometer OCR candidates evaluated', { requestId, candidateCount: sortedCandidates.length });
         if (bestCandidate) {
-          console.log(`Best candidate: ${bestCandidate.value} km (score: ${bestCandidate.score.toFixed(1)})`);
+          logger.info('Odometer OCR best candidate', { requestId, value: bestCandidate.value, score: Number(bestCandidate.score.toFixed(1)) });
         }
 
         // --- Update metrics ---
@@ -1476,10 +1480,10 @@ function attachRoutes(r: express.Router) {
 
       } catch (error: any) {
         const processingTime = Date.now() - startTime;
-        console.error("[/ocr/odometer] Textract error:", {
-          error: error.message,
-          code: error.code,
-          requestId: error.$metadata?.requestId,
+        logger.error('Odometer Textract error', {
+          requestId,
+          awsRequestId: error.$metadata?.requestId,
+          error: serializeError(error),
           processingTime,
         });
 
@@ -1715,14 +1719,19 @@ app.use("/intake/photos", photosRouter);
 // ---------- Server Startup ----------
 if (process.env.NODE_ENV !== "test") {
   app.listen(PORT, () => {
-    console.log(`WB Passport API listening on http://localhost:${PORT}`);
-    console.log(`Versioned API at ${API_PREFIX}`);
-    console.log(`AWS Textract configured: ${hasAwsConfig ? '✅' : '❌'}`);
-    console.log(`OCR cache TTL: ${TEXTRACT_CACHE_TTL}s`);
-    console.log(`Max file size: ${TEXTRACT_MAX_FILE_SIZE / 1024 / 1024}MB`);
-    
+    logger.info('WB Passport API listening', {
+      port: PORT,
+      apiUrl: `http://localhost:${PORT}`,
+      apiPrefix: API_PREFIX,
+    });
+    logger.info('OCR configuration', {
+      hasAwsConfig,
+      cacheTtlSeconds: TEXTRACT_CACHE_TTL,
+      maxFileSizeMb: TEXTRACT_MAX_FILE_SIZE / 1024 / 1024,
+    });
+
     if (!hasAwsConfig) {
-      console.log('⚠️  Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to enable OCR');
+      logger.warn('AWS credentials missing; Textract OCR endpoints will respond with 503');
     }
   });
 }
