@@ -473,25 +473,18 @@ function findBestVinCandidate(candidates: string[]): string | null {
 
 async function preprocessImageForOdometer(buffer: Buffer): Promise<Buffer> {
   try {
-    // Dashboard-specific preprocessing for digital displays
-    return await sharp(buffer)
-      // Resize to optimal dimensions for dashboard text
-      .resize(1600, 1200, { 
-        fit: 'inside', 
-        withoutEnlargement: true 
+    return await sharp(buffer, { failOn: 'none', limitInputPixels: 40_000_000 })
+      .rotate()
+      .resize({
+        width: 1280,
+        height: 1280,
+        fit: 'inside',
+        withoutEnlargement: true,
+        fastShrinkOnLoad: true,
       })
-      // Convert to grayscale first to reduce color noise from backlit displays
-      .grayscale()
-      // Increase contrast significantly for backlit LCD/LED displays
-      .normalize({ lower: 5, upper: 95 })
-      // Apply gamma correction to handle bright backlighting
-      .gamma(1.4)
-      // Enhance edges to sharpen segmented digital characters
-      .sharpen({ sigma: 1.2, m1: 1.0, m2: 0.2, x1: 2, y2: 10, y3: 20 })
-      // Apply unsharp mask for better character definition
-      .modulate({ brightness: 1.1, saturation: 0.8 })
-      // Convert back to high-quality JPEG
-      .jpeg({ quality: 95, progressive: true })
+      .greyscale()
+      .linear(1.1, -10)
+      .gamma(1.05)
       .toBuffer();
   } catch (error) {
     logger.warn('Odometer preprocessing failed, using original', { error: serializeError(error) });
@@ -1355,27 +1348,38 @@ function attachRoutes(r: express.Router) {
 
         logger.info('Processing odometer OCR request', { requestId, mimetype: req.file?.mimetype, sizeBytes: buf.length });
 
-        // --- Cache ---
-        const imageHash = getImageHash(buf);
-        const cacheKey = `odo:v3:${imageHash}`;
-        const cached = ocrCache.get(cacheKey);
-        if (cached) {
+        const originalHash = getImageHash(buf);
+        const rawCacheKey = `odo:v3:raw:${originalHash}`;
+        const cachedRaw = ocrCache.get(rawCacheKey);
+        if (cachedRaw) {
           const processingTime = Date.now() - startTime;
           metrics.cacheHits++;
-          logger.info('Odometer OCR cache hit', { requestId, cacheKey: imageHash });
-          return res.json({ ...(cached as any), fromCache: true, processingTime });
+          logger.info('Odometer OCR cache hit', { requestId, cacheKey: rawCacheKey, stage: 'raw' });
+          return res.json({ ...(cachedRaw as any), fromCache: true, processingTime });
         }
 
-        // --- Preprocess with odometer-specific enhancements ---
-        const processed = await preprocessImageForOdometer(buf); 
+        const preprocessStart = Date.now();
+        const processed = await preprocessImageForOdometer(buf);
+        const preprocessMs = Date.now() - preprocessStart;
+
+        const processedHash = getImageHash(processed);
+        const processedCacheKey = `odo:v3:proc:${processedHash}`;
+        const cachedProcessed = ocrCache.get(processedCacheKey);
+        if (cachedProcessed) {
+          const processingTime = Date.now() - startTime;
+          metrics.cacheHits++;
+          logger.info('Odometer OCR cache hit', { requestId, cacheKey: processedCacheKey, stage: 'processed' });
+          return res.json({ ...(cachedProcessed as any), fromCache: true, processingTime });
+        }
+
         const client = getTextractClient();
         if (!client) throw new Error("Textract client not available");
 
+        const textractStart = Date.now();
         const tex = await client.send(new DetectDocumentTextCommand({ Document: { Bytes: processed } }));
+        const textractMs = Date.now() - textractStart;
         const blocks = tex.Blocks || [];
-        const processingTime = Date.now() - startTime;
 
-        // Extract text with confidence scores
         const lines = blocks
           .filter(b => b.BlockType === "LINE" && b.Text && b.Confidence)
           .map(b => ({
@@ -1398,7 +1402,7 @@ function attachRoutes(r: express.Router) {
         logger.debug('Extracted odometer OCR lines', { requestId, lineCount });
         logger.debug('Odometer OCR text sample', { requestId, sample: allText.substring(0, 100) });
 
-        // --- Find odometer candidates using specialized functions ---
+        const heuristicsStart = Date.now();
         const candidates: Array<{
           value: number;
           raw: string;
@@ -1407,27 +1411,33 @@ function attachRoutes(r: express.Router) {
           source: string;
         }> = [];
 
-        // Method 1: Pattern-based extraction from text
         const textCandidates = findOdometerCandidates(allText);
         candidates.push(...textCandidates);
+        const textBest = textCandidates.reduce<OdometerCandidate | null>((best, cand) => {
+          if (!best || cand.score > best.score) return cand;
+          return best;
+        }, null);
 
-        // Method 2: High-confidence line analysis
-        for (const line of lines.filter(l => l.confidence > 70)) {
-          if (looksLikeSpeedometer(line.text)) continue;
-          
-          const lineCandidates = extractOdometerFromLine(line.text, line.confidence, line.bbox);
-          candidates.push(...lineCandidates);
+        let advancedHeuristicsRan = false;
+        if (!textBest || textBest.score < 28) {
+          advancedHeuristicsRan = true;
+
+          for (const line of lines.filter(l => l.confidence > 70)) {
+            if (looksLikeSpeedometer(line.text)) continue;
+            const lineCandidates = extractOdometerFromLine(line.text, line.confidence, line.bbox);
+            candidates.push(...lineCandidates);
+          }
+
+          const groupedCandidates = groupConsecutiveDigits(words);
+          candidates.push(...groupedCandidates);
+        } else {
+          logger.debug('Skipping advanced odometer heuristics', { requestId, topScore: textBest.score });
         }
 
-        // Method 3: Word grouping for separated digits (e.g., "1 4 7 8 9 5")
-        const groupedCandidates = groupConsecutiveDigits(words);
-        candidates.push(...groupedCandidates);
+        const heuristicsMs = Date.now() - heuristicsStart;
 
-        // Remove duplicates and sort by score
         const uniqueCandidates = removeDuplicateReadings(candidates);
         const sortedCandidates = uniqueCandidates.sort((a, b) => b.score - a.score);
-
-        // Select the best candidate
         const bestCandidate = sortedCandidates.length > 0 ? sortedCandidates[0] : null;
 
         logger.debug('Odometer OCR candidates evaluated', { requestId, candidateCount: sortedCandidates.length });
@@ -1435,17 +1445,16 @@ function attachRoutes(r: express.Router) {
           logger.info('Odometer OCR best candidate', { requestId, value: bestCandidate.value, score: Number(bestCandidate.score.toFixed(1)) });
         }
 
-        // --- Update metrics ---
         metrics.successfulRequests++;
         if (!(metrics as any).odoDetectionRate) (metrics as any).odoDetectionRate = 0;
         (metrics as any).odoDetectionRate =
           ((metrics as any).odoDetectionRate * (metrics.successfulRequests - 1) + (bestCandidate ? 1 : 0)) /
           metrics.successfulRequests;
+        const processingTime = Date.now() - startTime;
         metrics.averageProcessingTime =
           (metrics.averageProcessingTime * (metrics.successfulRequests - 1) + processingTime) /
           metrics.successfulRequests;
 
-        // --- Build response ---
         const response = {
           ok: true,
           km: bestCandidate ? bestCandidate.value : null,
@@ -1466,16 +1475,17 @@ function attachRoutes(r: express.Router) {
           totalBlocks: blocks.length,
           lineCount,
           fromCache: false,
+          timings: { preprocessMs, textractMs, heuristicsMs },
           debugInfo: process.env.NODE_ENV === 'development' ? {
             allText: allText.substring(0, 200),
             topCandidates: sortedCandidates.slice(0, 3)
           } : undefined
         };
 
-        // --- Cache successful results ---
-        if (bestCandidate || sortedCandidates.length > 0) {
-          ocrCache.set(cacheKey, response);
-        }
+        logger.debug('Odometer OCR timings', { requestId, preprocessMs, textractMs, heuristicsMs, totalMs: processingTime, advancedHeuristicsRan });
+        ocrCache.set(rawCacheKey, response);
+        ocrCache.set(processedCacheKey, response);
+
 
         return res.json(response);
 
