@@ -245,6 +245,34 @@ function isValidVin(vin: string): boolean {
   return upper[8] === expectedCheck;
 }
 
+function recoverVinFromText(text: string): string | null {
+  const U = (text || "").toUpperCase();
+  const labelPattern = /(VIN|V\/N|VN|CHASSIS|CHAS|NO)[^A-Z0-9]{0,4}([A-Z0-9\s]{10,28})/g;
+
+  const findValid = (candidate: string): string | null => {
+    const cleaned = candidate.replace(/[^A-Z0-9]/g, "").replace(/[IOQ]/g, "");
+    for (let i = 0; i <= cleaned.length - 17; i++) {
+      const slice = cleaned.slice(i, i + 17);
+      if (isValidVin(slice)) return slice;
+    }
+    return null;
+  };
+
+  let m: RegExpExecArray | null;
+  while ((m = labelPattern.exec(U)) !== null) {
+    const fromLabel = findValid(m[2]);
+    if (fromLabel) return fromLabel;
+  }
+
+  const cleanAll = U.replace(/[^A-Z0-9]/g, "").replace(/[IOQ]/g, "");
+  for (let i = 0; i <= cleanAll.length - 17; i++) {
+    const slice = cleanAll.slice(i, i + 17);
+    if (isValidVin(slice)) return slice;
+  }
+
+  return null;
+}
+
 function findOdometerCandidates(text: string): OdometerCandidate[] {
   const candidates: OdometerCandidate[] = [];
   
@@ -998,7 +1026,7 @@ function attachRoutes(r: express.Router) {
 
       let bestVin: string | null = null;
 
-      let extractionMethod: 'none' | 'licence_disc' | 'generic_fallback' = 'none';
+      let extractionMethod: 'none' | 'licence_disc' | 'generic_fallback' | 'label_scan' = 'none';
 
       let candidates: string[] = [];
 
@@ -1029,38 +1057,32 @@ function attachRoutes(r: express.Router) {
 
 
       let fallbackRan = false;
-
       if (!bestVin) {
-
         fallbackRan = true;
-
         try {
-
           let genericCandidates = findVinCandidates(highConfidenceText);
-
           if (genericCandidates.length === 0) genericCandidates = findVinCandidates(allText);
-
           bestVin = findBestVinCandidate(genericCandidates);
-
           if (bestVin) {
-
             extractionMethod = 'generic_fallback';
-
             candidates = genericCandidates.slice(0, 5);
-
             logger.debug('VIN found via generic extraction', { requestId, vin: bestVin });
-
           }
-
         } catch (error) {
-
           logger.warn('Generic VIN extraction failed', { requestId, error: serializeError(error) });
-
         }
-
       }
 
-
+      if (!bestVin || !isValidVin(bestVin)) {
+        const recovered = recoverVinFromText(allText);
+        if (recovered) {
+          if (!bestVin || bestVin !== recovered) {
+            candidates = [recovered, ...candidates.filter((c) => c !== recovered)];
+          }
+          bestVin = recovered;
+          extractionMethod = 'label_scan';
+        }
+      }
 
       const heuristicsMs = Date.now() - heuristicsStart;
 
@@ -1841,6 +1863,7 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 export default app;
+
 
 
 
