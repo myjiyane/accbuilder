@@ -33,7 +33,7 @@ export function mapToPassportDraft(text: string, opts: MapOptions = {}): Passpor
   const vin = extractVin(text) || "UNKNOWNVIN0000000";
   const inspection_ts = extractInspectionDate(text);
   const siteExtracted = extractSite(text);
-  const site = opts.siteHint ?? siteExtracted ?? null;
+  const site = opts.siteHint ?? siteExtracted ?? undefined;
 
   const km = extractOdometerKm(text);
   const tyresRaw = extractTyres(text);
@@ -55,8 +55,8 @@ export function mapToPassportDraft(text: string, opts: MapOptions = {}): Passpor
     
     dekra: {
       ...(dekraUrl ? { url: dekraUrl } : {}),
-      inspection_ts,
-      site: site || undefined,
+      inspection_ts: inspection_ts ?? undefined,
+      site,
     },
     odometer: {
       km: km ?? null,
@@ -68,7 +68,6 @@ export function mapToPassportDraft(text: string, opts: MapOptions = {}): Passpor
       rear_pct: null,
     },
     dtc: dtc.status === "n/a" && dtc.codes.length === 0 ? undefined : dtc,
-    remarks: null,
     provenance: {
       captured_by: opts.capturedBy || "system",
       site,

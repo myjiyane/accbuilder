@@ -7,7 +7,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { S3Client, PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import type { PassportDraft } from "../types/passport.js";
+import type { PassportDraft, ImageRole } from "../types/passport.js";
 
 /** Minimal shape your storage exposes; matches createDevStorage */
 export interface StorageLike {
@@ -16,6 +16,25 @@ export interface StorageLike {
 }
 
 /** Build a photos router that closes over the shared storage */
+const IMAGE_ROLES = [
+  'exterior_front_34',
+  'exterior_rear_34',
+  'left_side',
+  'right_side',
+  'interior_front',
+  'interior_rear',
+  'dash_odo',
+  'engine_bay',
+  'tyre_fl',
+  'tyre_fr',
+  'tyre_rl',
+  'tyre_rr',
+] as const satisfies readonly ImageRole[];
+
+function isImageRole(value: unknown): value is ImageRole {
+  return typeof value === 'string' && IMAGE_ROLES.includes(value as ImageRole);
+}
+
 export function makePhotosRouter(storage: StorageLike) {
   const router = express.Router();
 
@@ -44,12 +63,14 @@ export function makePhotosRouter(storage: StorageLike) {
   router.post("/upload", upload.single("file"), async (req, res) => {
     try {
       const vin = sanitizeVin(req.body.vin);
-      const role = String(req.body.role || "");
+      const roleInput = req.body.role;
       const buf = req.file?.buffer;
 
-      if (!vin || !role || !buf) {
+      if (!vin || !isImageRole(roleInput) || !buf) {
         return res.status(400).json({ error: "vin_role_file_required" });
       }
+
+      const role = roleInput;
 
       const ts = new Date().toISOString().replace(/[:.]/g, "");
       const fname = `${vin}_${role}_${ts}.jpg`;
@@ -88,13 +109,18 @@ export function makePhotosRouter(storage: StorageLike) {
     }
     const vin = sanitizeVin(req.body.vin);
     const lot = String(req.body.lot_id || "");
-    const files = Array.isArray(req.body.files) ? req.body.files : [];
-    if (!vin || files.length === 0) {
+    const filesRaw = Array.isArray(req.body.files) ? req.body.files : [];
+    if (!vin || filesRaw.length === 0) {
       return res.status(400).json({ error: "vin_and_files_required" });
+    }
+    const invalidFile = filesRaw.find((f: any) => !isImageRole(f?.role));
+    if (invalidFile) {
+      return res.status(400).json({ error: "invalid_role", role: invalidFile?.role });
     }
 
     const uploads = await Promise.all(
-      files.map(async (f: any) => {
+      filesRaw.map(async (f: any) => {
+        const role = f.role as ImageRole;
         const ext = f?.mime === "image/png" ? "png" : "jpg";
         const key = `${vin}/${crypto.randomUUID()}.${ext}`;
         const put = new PutObjectCommand({
@@ -103,7 +129,7 @@ export function makePhotosRouter(storage: StorageLike) {
           ContentType: f?.mime || "image/jpeg",
         });
         const url = await getSignedUrl(s3, put, { expiresIn: 900 });
-        return { role: f.role, method: "PUT", url, object_key: key };
+        return { role, method: "PUT", url, object_key: key };
       })
     );
 
@@ -115,13 +141,19 @@ export function makePhotosRouter(storage: StorageLike) {
       return res.status(400).json({ error: "s3_not_configured" });
     }
     const vin = sanitizeVin(req.body.vin);
-    const items = Array.isArray(req.body.items) ? req.body.items : [];
-    if (!vin || items.length === 0) {
+    const itemsRaw = Array.isArray(req.body.items) ? req.body.items : [];
+    if (!vin || itemsRaw.length === 0) {
       return res.status(400).json({ error: "vin_and_items_required" });
     }
+    const invalidItem = itemsRaw.find((it: any) => !isImageRole(it?.role));
+    if (invalidItem) {
+      return res.status(400).json({ error: "invalid_role", role: invalidItem?.role });
+    }
 
-    const enriched: any[] = [];
-    for (const it of items) {
+    const enriched: Array<
+      Required<NonNullable<PassportDraft["images"]>>["items"][number]
+    > = [];
+    for (const it of itemsRaw) {
       // Optional: probe object head (dims not known from S3)
       try {
         await s3.send(new HeadObjectCommand({ Bucket: S3_BUCKET, Key: it.object_key }));
@@ -129,10 +161,10 @@ export function makePhotosRouter(storage: StorageLike) {
         // ignore if not available; you can compute sha/dims via Lambda in prod
       }
       enriched.push({
-        role: it.role,
-        object_key: it.object_key,
-        url: null, // keep null; you'll serve via CDN or presigned GET in prod
-        sha256: null,
+        role: it.role as ImageRole,
+        object_key: String(it.object_key),
+        url: undefined, // served via CDN or presigned GET in prod
+        sha256: undefined,
         w: undefined,
         h: undefined,
         captured_ts: new Date().toISOString(),

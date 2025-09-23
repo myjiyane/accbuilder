@@ -15,7 +15,7 @@ import { TextractClient, DetectDocumentTextCommand } from "@aws-sdk/client-textr
 import { fromEnv } from "@aws-sdk/credential-providers";
 
 import { createDevStorage } from "./storage.js";
-import type { PassportDraft, PassportSealed } from "../types/passport.js";
+import type { PassportDraft, PassportSealed, ImageRole } from "../types/passport.js";
 import { validateDraft, validateSealed } from "../schema/index.js";
 import { mapToPassportDraft } from "../ingest/dekra/mapper.js";
 
@@ -37,7 +37,7 @@ type OdometerCandidate = {
   raw: string;
   score: number;
   source: OdometerCandidateSource;
-  confidence?: number;
+  confidence: number;
   bbox?: Block["Geometry"];
 };
 
@@ -266,7 +266,8 @@ function findOdometerCandidates(text: string): OdometerCandidate[] {
             value,
             raw,
             score: calculateOdometerScore(value, raw, hasOdoKeyword) * priorityMultiplier,
-            source: 'text_pattern'
+            source: 'text_pattern',
+            confidence: 0,
           });
         }
       }
@@ -285,7 +286,7 @@ function extractOdometerFromLine(text: string, confidence: number, bbox: any): A
   confidence: number;
   source: string;
 }> {
-  const candidates = [];
+  const candidates: Array<{ value: number; raw: string; score: number; confidence: number; source: string; }> = [];
   
   // Skip obvious non-odometer lines
   if (looksLikeSpeedometer(text) || /trip|time|temp/i.test(text)) {
@@ -316,7 +317,7 @@ function extractOdometerFromLine(text: string, confidence: number, bbox: any): A
           raw,
           score,
           confidence,
-          source: 'line_extraction'
+          source: 'line_extraction',
         });
       }
     }
@@ -333,7 +334,7 @@ function groupConsecutiveDigits(words: Array<{text: string; confidence: number; 
   confidence: number;
   source: string;
 }> {
-  const candidates = [];
+  const candidates: Array<{ value: number; raw: string; score: number; confidence: number; source: string; }> = [];
   
   // Look for sequences of single digits that might be separated odometer readings
   const digitWords = words.filter(w => /^\d{1,3}$/.test(w.text) && w.confidence > 60);
@@ -363,7 +364,7 @@ function groupConsecutiveDigits(words: Array<{text: string; confidence: number; 
           raw: sequence.map(s => s.text).join(' '),
           score: calculateOdometerScore(value, combined, false) + 2, // Bonus for grouped digits
           confidence: avgConfidence,
-          source: 'digit_grouping'
+          source: 'digit_grouping',
         });
       }
     }
@@ -992,7 +993,7 @@ function attachRoutes(r: express.Router) {
       // Method 1: Try licence disc-specific extraction first
       let bestVin = null;
       let extractionMethod = 'none';
-      let candidates = [];
+      let candidates: string[] = [];
 
       try {
         const licenceDiscCandidates = findVinFromLicenceDisc(allText, lines, words);
@@ -1571,7 +1572,7 @@ function attachRoutes(r: express.Router) {
           dtcStatus: "n/a",
           requiredCount: 0,
           presentCount: 0,
-          missing: [] as string[],
+          missing: [] as ImageRole[],
         },
         ready: false
       });
@@ -1580,8 +1581,8 @@ function attachRoutes(r: express.Router) {
     const draft = rec.draft;
     const sealed = rec.sealed;
 
-    const required: string[] =
-      (draft?.images?.required?.length ? draft.images.required : sealed?.images?.required) || [];
+    const required: ImageRole[] =
+      (draft?.images?.required?.length ? draft.images.required : sealed?.images?.required) ?? ([] as ImageRole[]);
 
     const items = [
       ...(sealed?.images?.items || []),
@@ -1589,7 +1590,7 @@ function attachRoutes(r: express.Router) {
     ];
     
     const presentRoles = new Set(items.map((i) => i.role));
-    const missing = required.filter((r) => !presentRoles.has(r));
+    const missing = required.filter((role) => !presentRoles.has(role));
 
     const hasDekra = !!(draft?.dekra?.url || sealed?.dekra?.url);
     const odoKm = draft?.odometer?.km ?? sealed?.odometer?.km;
@@ -1627,7 +1628,7 @@ function attachRoutes(r: express.Router) {
       }
 
       // Validate tyre measurements
-      const validTyre = (val) => val === null || (typeof val === 'number' && val >= 0 && val <= 12);
+      const validTyre = (val: unknown) => val === null || (typeof val === 'number' && val >= 0 && val <= 12);
       if (!validTyre(tyres.fl) || !validTyre(tyres.fr) || !validTyre(tyres.rl) || !validTyre(tyres.rr)) {
         return res.status(400).json({ error: "invalid_tyre_measurements" });
       }
@@ -1644,8 +1645,9 @@ function attachRoutes(r: express.Router) {
 
       const updated = await storage.upsertDraft(draft);
       res.json({ ok: true, record: updated });
-    } catch (e) {
-      res.status(500).json({ error: "save_tyres_failed", message: e?.message || String(e) });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: "save_tyres_failed", message });
     }
   });
 
@@ -1737,3 +1739,7 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 export default app;
+
+
+
+
