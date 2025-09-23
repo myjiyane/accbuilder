@@ -18,6 +18,7 @@ import { createDevStorage } from "./storage.js";
 import type { PassportDraft, PassportSealed, ImageRole } from "../types/passport.js";
 import { validateDraft, validateSealed } from "../schema/index.js";
 import { mapToPassportDraft } from "../ingest/dekra/mapper.js";
+import { preprocessImageForOdometer } from "./odometer/preprocess.js";
 
 // ---------- Configuration & Environment ----------
 const DATA_DIR = process.env.DATA_DIR || "data";
@@ -470,27 +471,6 @@ function findBestVinCandidate(candidates: string[]): string | null {
   return candidates.length > 0 ? candidates[0] : null;
 }
 
-
-async function preprocessImageForOdometer(buffer: Buffer): Promise<Buffer> {
-  try {
-    return await sharp(buffer, { failOn: 'none', limitInputPixels: 40_000_000 })
-      .rotate()
-      .resize({
-        width: 1280,
-        height: 1280,
-        fit: 'inside',
-        withoutEnlargement: true,
-        fastShrinkOnLoad: true,
-      })
-      .greyscale()
-      .linear(1.1, -10)
-      .gamma(1.05)
-      .toBuffer();
-  } catch (error) {
-    logger.warn('Odometer preprocessing failed, using original', { error: serializeError(error) });
-    return buffer;
-  }
-}
 
 async function preprocessImageForLicenceDisc(buffer: Buffer): Promise<Buffer> {
   try {
