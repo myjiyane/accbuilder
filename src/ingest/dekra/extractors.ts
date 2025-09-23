@@ -101,7 +101,17 @@ export function extractOdometerKm(text: string): number | null {
 export function extractTyres(text: string): TyreDepths {
   const lines = norm(text).split('\n');
   const blockLines: string[] = [];
-  for (const l of lines) if (TYRE_HINT_RE.test(l)) blockLines.push(l);
+  lines.forEach((line, idx) => {
+    if (TYRE_HINT_RE.test(line)) {
+      blockLines.push(line);
+      for (let offset = 1; offset <= 3; offset++) {
+        const lookahead = lines[idx + offset];
+        if (!lookahead || lookahead.trim().length === 0) break;
+        blockLines.push(lookahead);
+        if (/mm/i.test(lookahead)) break;
+      }
+    }
+  });
   const block = blockLines.join('\n');
   const mm = [...block.matchAll(/(\d+(?:\.\d+)?)\s*mm/gi)].map(m => parseFloat(m[1]));
   const [fl, fr, rl, rr] = mm.slice(0, 4);
@@ -125,6 +135,7 @@ const NO_FAULT_PHRASES = [
   /\bNO\s+(DTCS?|FAULT(S)?|ERROR(S)?|TROUBLE\s+CODES?)\b/i,
   /\bNO\s+FAULT\s+CODES\s+FOUND\b/i,
   /\bNO\s+DIAGNOSTIC\s+TROUBLE\s+CODES?\b/i,
+  /\bNO\s+ACTIVE\s+ERROR\s+MESSAGES?\b/i,
 ];
 const HAS_DTC_SECTION = [
   /\bDIAGNOSTIC\s+TROUBLE\s+CODES?\b/i,
@@ -165,4 +176,5 @@ export function extractDtc(text: string): { status: DtcStatus; codes: { code: st
 
   return { status, codes };
 }
+
 
