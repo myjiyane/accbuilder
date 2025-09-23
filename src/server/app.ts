@@ -202,9 +202,21 @@ function sanitizeVin(v?: string) {
 }
 
 function normalizeVin(raw: string) {
-  return raw.toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/[IOQ]/g, "").slice(0, 17);
-}
+  let upper = (raw || "").toUpperCase();
 
+  upper = upper.replace(/^(?:VIN|V\/N|VN|CHASSIS|CHAS|NO)\s*[:\-#]?\s*/, "");
+  upper = upper.replace(/^(VIN|V\/N|VN)(?=[A-Z0-9]{5,})/, "");
+
+  let cleaned = upper.replace(/[^A-Z0-9]/g, "");
+
+  if (cleaned.startsWith("VIN") && cleaned.length > 17) cleaned = cleaned.slice(3);
+  else if (cleaned.startsWith("VN") && cleaned.length > 17) cleaned = cleaned.slice(2);
+
+  cleaned = cleaned.replace(/[IOQ]/g, "");
+
+  if (cleaned.length > 17) cleaned = cleaned.slice(0, 17);
+  return cleaned;
+}
 function isValidVin(vin: string): boolean {
   if (!vin || vin.length !== 17) return false;
   
@@ -1829,6 +1841,7 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 export default app;
+
 
 
 
