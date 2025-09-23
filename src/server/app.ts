@@ -29,51 +29,6 @@ const TEXTRACT_MAX_FILE_SIZE = Number(process.env.TEXTRACT_MAX_FILE_SIZE);
 const TEXTRACT_CACHE_TTL = Number(process.env.TEXTRACT_CACHE_TTL);
 
 
-
-/** merge consecutive numeric WORDs on the same line (e.g. "12 345" -> "12345") */
-function groupNumericSpans(words: { text: string; conf: number; lineId: string; bbox?: Block["Geometry"] }[]) {
-  const groups: { raw: string; confAvg: number; bbox?: Block["Geometry"]; lineId: string }[] = [];
-  let cur: { parts: string[]; confs: number[]; bbox?: Block["Geometry"]; lineId: string } | null = null;
-
-  const isNumericish = (t: string) => /^[\d.,]+$/.test(t);
-
-  for (const w of words) {
-    if (isNumericish(w.text)) {
-      if (!cur || cur.lineId !== w.lineId) {
-        if (cur) {
-          groups.push({
-            raw: cur.parts.join(""),
-            confAvg: cur.confs.reduce((a, b) => a + b, 0) / cur.confs.length,
-            bbox: cur.bbox,
-            lineId: cur.lineId,
-          });
-        }
-        cur = { parts: [w.text], confs: [w.conf], bbox: w.bbox, lineId: w.lineId };
-      } else {
-        cur.parts.push(w.text);
-        cur.confs.push(w.conf);
-      }
-    } else if (cur) {
-      groups.push({
-        raw: cur.parts.join(""),
-        confAvg: cur.confs.reduce((a, b) => a + b, 0) / cur.confs.length,
-        bbox: cur.bbox,
-        lineId: cur.lineId,
-      });
-      cur = null;
-    }
-  }
-  if (cur) {
-    groups.push({
-      raw: cur.parts.join(""),
-      confAvg: cur.confs.reduce((a, b) => a + b, 0) / cur.confs.length,
-      bbox: cur.bbox,
-      lineId: cur.lineId,
-    });
-  }
-  return groups;
-}
-
 type OdoCand = {
   value: number;
   raw: string;
@@ -81,20 +36,6 @@ type OdoCand = {
   conf: number;
   bbox?: Block["Geometry"];
 };
-
-function pickBest(cands: OdoCand[]) {
-  if (!cands.length) return null;
-  return [...cands].sort((a, b) => (b.score - a.score) || (b.value - a.value))[0];
-}
-
-
-// ---------- Heuristics / helpers (odometer-focused) ----------
-
-const ws = (s: string) => s.replace(/\s+/g, " ").trim();
-const isTimeLike = (s: string) => /^\d{1,2}[:.]\d{2}$/.test(s);
-const looksLikeSpeed = (s: string) => /\b(km\/h|kmh|mph)\b/i.test(s);
-const digitsOnly = (s: string) => s.replace(/[^\d]/g, "");
-
 
 type OdoCand = {
   value: number;
@@ -104,81 +45,6 @@ type OdoCand = {
   near: string[];
   lineConf?: number;
 };
-
-function extractOdoCandidates(lines: { text: string; confidence: number }[]): OdoCand[] {
-  const out: OdoCand[] = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const cur = lines[i];
-    const prev = lines[i - 1];
-    const next = lines[i + 1];
-
-    const curText = ws(cur.text);
-    const neighbor = ws([prev?.text || "", cur.text, next?.text || ""].join(" "));
-
-    // Skip obvious non-odometer contexts
-    if (/\b(TRIP|TRIP\s*A|TRIP\s*B)\b/i.test(neighbor)) continue;
-
-    const hasODO = /\b(ODO|ODOMETER|MILEAGE|KILOMETRAGE|TOTAL)\b/i.test(neighbor);
-    const hasKM = /\bKM\b/i.test(neighbor);
-    const hasMI = /\bMI(?![A-Z])\b/i.test(neighbor) || /\bMILES\b/i.test(neighbor);
-    const hasSpeed = looksLikeSpeed(neighbor);
-
-    // Match 3-6 digits, with optional thousand separators:
-    // 123 • 12,345 • 123,456 • 123.456
-    const re = /\b(\d{1,3}(?:[.,]\d{3}){0,2}|\d{3,6})\b/g;
-    let m: RegExpExecArray | null;
-
-    while ((m = re.exec(curText))) {
-      const raw = m[1];
-
-      if (isTimeLike(raw)) continue;
-
-      const canonical = raw.replace(/[.,](?=\d{3}\b)/g, ""); // strip thousand separators
-      const n = parseInt(digitsOnly(canonical), 10);
-      if (!Number.isFinite(n)) continue;
-
-      // Reasonable odometer range (adjustable)
-      const MAX = Number(process.env.MAX_ODOMETER || 1500000);
-      if (n < 50 || n > MAX) continue;
-
-      if (hasSpeed) continue; // avoid km/h, mph contexts
-
-      let unit: "km" | "mi" | null = null;
-      if (hasKM) unit = "km";
-      else if (hasMI) unit = "mi";
-
-      // Scoring
-      let score = 0;
-      // base: OCR confidence
-      score += Math.min(10, Math.floor((cur.confidence || 80) / 10));
-      // proximity to cues
-      if (hasODO) score += 8;
-      if (unit === "km") score += 4;
-      if (unit === "mi") score += 3;
-      // prefer bigger plausible odometers
-      if (n >= 10000) score += 2;
-      if (n >= 100000) score += 1;
-      // slight penalty if "TRIP" is around (we already skipped most)
-      if (/\bTRIP\b/i.test(neighbor)) score -= 2;
-
-      const near: string[] = [];
-      if (hasODO) near.push("ODO");
-      if (hasKM) near.push("KM");
-      if (hasMI) near.push("MI");
-      if (hasSpeed) near.push("SPEED");
-
-      out.push({ value: n, raw, unit, score, near, lineConf: cur.confidence });
-    }
-  }
-
-  return out;
-}
-
-function pickBestOdo(cands: OdoCand[]): OdoCand | null {
-  if (!cands.length) return null;
-  return [...cands].sort((a, b) => (b.score - a.score) || (b.value - a.value))[0];
-}
 
 
 // ---------- AWS Configuration ----------
@@ -286,6 +152,51 @@ function verifyBytesRS256(buf: Buffer, b64sig: string): boolean | null {
     return false;
   }
 }
+
+
+// ---- EV detection (VIN heuristic) ----
+type EvDetectResult = {
+  isElectric: boolean;
+  make?: string;
+  model?: string;
+  smartcarCompatible: boolean;
+  batteryEstimateKwh?: number;
+  confidence: number;                 // 0..1, because WMI can be shared across ICE/EV
+  source: 'vin_heuristic';
+  notes?: string;
+};
+
+const EV_CAPABILITIES: Record<string, { make: string; smartcar: boolean; battery: number; note?: string }> = {
+  WDD: { make: 'Mercedes-Benz', smartcar: true,  battery: 80 }, // EQ family
+  WBA: { make: 'BMW',           smartcar: true,  battery: 85 }, // i4/iX
+  JYJ: { make: 'Tesla',         smartcar: true,  battery: 75 }, // Model 3/Y
+  WVW: { make: 'Volkswagen',    smartcar: true,  battery: 77 }, // ID.3/ID.4 (region dependent)
+  // NOTE: BYD ZA imports often show "LGX" as WMI (not LYV; LYV is Volvo).
+  // Add/adjust as you see real VINs on site:
+  LGX: { make: 'BYD', smartcar: false, battery: 60, note: 'Confirm locally' },
+};
+
+function detectEVFromVin(vinRaw: string): EvDetectResult {
+  const vin = (vinRaw || '').trim().toUpperCase();
+  if (vin.length !== 17) {
+    return { isElectric: false, smartcarCompatible: false, confidence: 0, source: 'vin_heuristic', notes: 'invalid_vin_length' };
+  }
+  const wmi = vin.substring(0, 3);
+  const match = EV_CAPABILITIES[wmi];
+  // Be conservative; increase to 0.9 for WMIs you verify as EV-only in SA.
+  const confidence = match ? 0.7 : 0;
+  return {
+    isElectric: !!match,
+    make: match?.make,
+    model: undefined,
+    smartcarCompatible: match?.smartcar ?? false,
+    batteryEstimateKwh: match?.battery,
+    confidence,
+    source: 'vin_heuristic',
+    notes: match?.note,
+  };
+}
+
 
 // ---------- Enhanced VIN Functions ----------
 function sanitizeVin(v?: string) {
@@ -487,8 +398,8 @@ function looksLikeSpeedometer(text: string): boolean {
 
 function isValidOdometerReading(value: number): boolean {
   // Reasonable odometer ranges for different vehicle types
-  const MIN_ODO = 0; // Allow brand new vehicles
-  const MAX_ODO = 2000000; // 2M km is extremely high but possible for commercial vehicles
+  const MIN_ODO = 5000; // Allow brand new vehicles
+  const MAX_ODO = 300000; // 2M km is extremely high but possible for commercial vehicles
   
   if (value < MIN_ODO || value > MAX_ODO) return false;
   
@@ -513,7 +424,7 @@ function calculateOdometerScore(value: number, raw: string, hasKeyword: boolean)
   if (hasKeyword) score += 8;
   
   // Common odometer patterns
-  if (value >= 1000 && value <= 500000) score += 5; // Most common range
+  if (value >= 5000 && value <= 500000) score += 5; // Most common range
   if (value % 1000 === 0) score -= 2; // Round thousands less likely
   if (raw.includes(',') || raw.includes('.')) score += 3; // Formatted numbers
   
@@ -1352,10 +1263,12 @@ function attachRoutes(r: express.Router) {
     res.json({ valid, reasons, hash: hashExpected, key_id: sealed.seal?.key_id || null });
   });
 
-  // Initialize/ensure a draft for a new VIN
+
   r.post("/intake/init", async (req, res) => {
     try {
       const vin = sanitizeVin(req.body?.vin);
+      const evInfo = detectEVFromVin(vin);
+
       const lotId = String(req.body?.lot_id || "WB-POC-001");
       if (!vin) return res.status(400).json({ error: "vin_required" });
 
@@ -1379,8 +1292,36 @@ function attachRoutes(r: express.Router) {
         }
       }
 
+      (draft as any).ev = (draft as any).ev || {};
+      if (evInfo.isElectric) {
+        (draft as any).ev.isElectric = true;
+        (draft as any).ev.batteryCapacityKwh = evInfo.batteryEstimateKwh;
+        (draft as any).ev.capabilities = {
+          obd_ev_pids: true,                         // we’ll refine per-model later
+          smartcar_oauth: evInfo.smartcarCompatible, // we won’t use without consent
+          manual: true,
+        };
+        (draft as any).ev.provenance = {
+          detection: evInfo.source,                  
+          detectionConfidence: evInfo.confidence,    
+        };
+      } else {
+        // keep ev undefined or minimal; don’t add checklist noise for ICE
+      }
+
       const updated = await storage.upsertDraft(draft);
-      res.json({ ok: true, record: updated });
+      res.json({ 
+        ok: true, 
+        record: updated,
+        evReadiness: {
+          isElectricLikely: evInfo.isElectric,
+          confidence: evInfo.confidence,
+          smartcarCompatible: evInfo.smartcarCompatible,
+          estimatedCapacityKwh: evInfo.batteryEstimateKwh ?? null,
+          source: evInfo.source,
+          checkedAt: new Date().toISOString(),
+        } 
+      });
     } catch (e: any) {
       res.status(500).json({ error: "init_failed", message: e?.message || String(e) });
     }

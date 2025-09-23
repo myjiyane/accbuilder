@@ -1,5 +1,6 @@
 export type OdometerSource = 'DEKRA' | 'photo_only' | 'n/a';
 export type DtcStatus = 'green' | 'amber' | 'red' | 'n/a';
+export type EvBatterySource = 'obd' | 'manual' | 'photo' | 'mock';
 
 export interface DtcCode {
   code: string;       // e.g., P0420
@@ -36,41 +37,79 @@ export interface ImagesManifest {
   items: ImageItem[];     // captured photos
 }
 
-
 export interface PassportBase {
-  vin: string;        
+  vin: string;
   lot_id: string;
+
   dekra?: {
     url?: string;
     report_id?: string;
     inspection_ts?: string;
     site?: string;
   };
+
   odometer?: {
     km?: number | null;
     source?: OdometerSource;
   };
+
   tyres_mm?: {
     fl?: number | null;
     fr?: number | null;
     rl?: number | null;
     rr?: number | null;
   };
+
   brakes?: {
     front_pct?: number | null;
     rear_pct?: number | null;
     notes?: string;
   };
+
   dtc?: {
     status?: DtcStatus;
     codes?: DtcCode[];
   };
+
+  ev?: {
+    /** Heuristic or confirmed EV flag */
+    isElectric?: boolean;
+
+    /** From VIN/specs (nominal pack size) */
+    batteryCapacityKwh?: number;
+
+    /** Capability hints for intake/checklist routing */
+    capabilities?: {
+      obd_ev_pids?: boolean;       // default true if EV-likely
+      smartcar_oauth?: boolean;    // heuristic; we won’t use without consent
+      manual?: boolean;            // always true
+    };
+
+    /** Where current EV flags/data came from */
+    provenance?: {
+      detection?: 'vin_heuristic' | 'manual';
+      detectionConfidence?: number;        // 0..1
+      batterySource?: EvBatterySource;     // source of last reading
+    };
+
+    /** Latest known battery snapshot (values shown to buyers) */
+    batteryHealth?: {
+      soh_pct?: number;                    // usually unavailable via generic OBD
+      soc_pct?: number;                    // state of charge (%)
+      rangeKm?: number;                    // remaining range (km)
+      chargingStatus?: 'charging' | 'idle' | 'discharging';
+      lastUpdated?: string;                // ISO8601 timestamp
+    };
+  };
+
   remarks?: string;
-  provenance: {
+
+  provenance?: {
     captured_by: string; // staff id or 'system'
     site?: string;
     ts: string;          // ISO8601
   };
+
   images?: ImagesManifest;
 }
 
